@@ -50,6 +50,7 @@ export function App() {
   const [importBlob, setImportBlob] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const refresh = useEffectEvent(() => {
     startTransition(() => setTick((t) => t + 1));
@@ -283,6 +284,7 @@ export function App() {
     setActivePeer(peerId);
     setActiveGroup(null);
     setReplyToId(null);
+    setEditingId(null);
     await p2p.connectToPeer(peerId);
     refresh();
   }
@@ -290,13 +292,16 @@ export function App() {
   async function send() {
     if (!draft.trim()) return;
     if (activeGroup) {
-      if (replyToId) {
+      if (editingId) {
+        groups.sendGroupEdit(activeGroup, editingId, draft.trim());
+      } else if (replyToId) {
         groups.sendGroupReply(activeGroup, draft.trim(), replyToId);
       } else {
         groups.sendGroupMessage(activeGroup, draft.trim());
       }
       setDraft("");
       setReplyToId(null);
+      setEditingId(null);
       refresh();
       return;
     }
@@ -307,7 +312,9 @@ export function App() {
       mode === "time_limited" && decryptUntil
         ? { decryptionDeadlineAt: new Date(decryptUntil).getTime() }
         : undefined;
-    if (replyToId) {
+    if (editingId) {
+      await messaging.sendEdit(activePeer, contact.publicKey, editingId, draft.trim());
+    } else if (replyToId) {
       await messaging.sendReply(
         activePeer,
         contact.publicKey,
@@ -321,6 +328,7 @@ export function App() {
     }
     setDraft("");
     setReplyToId(null);
+    setEditingId(null);
     refresh();
   }
 
@@ -346,10 +354,38 @@ export function App() {
         if (!contact) return;
         await messaging.sendDelete(activePeer, contact.publicKey, messageId);
       }
+      if (editingId === messageId) {
+        setEditingId(null);
+        setDraft("");
+      }
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
     }
+  }
+
+  async function pinMsg(messageId: string) {
+    if (!conversationId) return;
+    try {
+      if (activeGroup) {
+        groups.sendGroupPin(activeGroup, messageId);
+      } else if (activePeer) {
+        const contact = contacts.find((c) => c.peerId === activePeer);
+        if (!contact) return;
+        await messaging.sendPin(activePeer, contact.publicKey, conversationId, messageId);
+      }
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Pin failed");
+    }
+  }
+
+  function startEdit(messageId: string) {
+    const m = store.getMessage(messageId);
+    if (!m || m.senderId !== identity.peerId || m.status === "deleted") return;
+    setEditingId(messageId);
+    setReplyToId(null);
+    setDraft(displayBody(m.plaintextCache));
   }
 
   function createGroup() {
@@ -607,6 +643,8 @@ export function App() {
                   onClick={() => {
                     setActiveGroup(g.groupId);
                     setActivePeer(null);
+                    setReplyToId(null);
+                    setEditingId(null);
                     void groups.ensureTopology().then(() => refresh());
                     refresh();
                   }}
@@ -737,6 +775,27 @@ export function App() {
               <p style={{ color: "var(--muted)" }}>Select a contact or group.</p>
             )}
 
+            {conversationId &&
+              store.listPins(conversationId).map((pin) => {
+                const pinned = store.getMessage(pin.messageId);
+                const body =
+                  !pinned || pinned.status === "deleted"
+                    ? "(deleted)"
+                    : displayBody(pinned.plaintextCache) || "…";
+                return (
+                  <div className="pin-banner" key={pin.messageId}>
+                    <span>Pinned: {body.slice(0, 100)}</span>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => void pinMsg(pin.messageId)}
+                    >
+                      Unpin
+                    </button>
+                  </div>
+                );
+              })}
+
             <div className="messages">
               {messages
                 .filter((m) => {
@@ -754,6 +813,10 @@ export function App() {
                       : displayBody(replyParent.plaintextCache)
                     : null;
                   const reactions = store.reactionSummary(m.messageId);
+                  const pinned = conversationId
+                    ? store.isPinned(conversationId, m.messageId)
+                    : false;
+                  const edited = store.isMessageEdited(m.messageId);
                   return (
                     <div
                       key={m.messageId}
@@ -761,6 +824,8 @@ export function App() {
                     >
                       <div className="meta">
                         {m.senderId.slice(0, 10)}… · {m.status} · {m.securityMode}
+                        {edited ? " · edited" : ""}
+                        {pinned ? " · pinned" : ""}
                         {m.decryptionDeadline
                           ? ` · decrypt≠after ${new Date(m.decryptionDeadline).toLocaleTimeString()}`
                           : ""}
@@ -793,7 +858,10 @@ export function App() {
                           <button
                             type="button"
                             className="secondary"
-                            onClick={() => setReplyToId(m.messageId)}
+                            onClick={() => {
+                              setEditingId(null);
+                              setReplyToId(m.messageId);
+                            }}
                           >
                             Reply
                           </button>
@@ -804,14 +872,30 @@ export function App() {
                           >
                             👍
                           </button>
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void pinMsg(m.messageId)}
+                          >
+                            {pinned ? "Unpin" : "Pin"}
+                          </button>
                           {m.senderId === identity.peerId && (
-                            <button
-                              type="button"
-                              className="secondary"
-                              onClick={() => void deleteMsg(m.messageId)}
-                            >
-                              Delete
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => startEdit(m.messageId)}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => void deleteMsg(m.messageId)}
+                              >
+                                Delete
+                              </button>
+                            </>
                           )}
                           {!m.plaintextCache && (
                             <button
@@ -874,7 +958,22 @@ export function App() {
                       ))}
                   </div>
                 )}
-                {replyToId && (
+                {editingId && (
+                  <div className="reply-banner">
+                    Editing {editingId.slice(0, 8)}…
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        setEditingId(null);
+                        setDraft("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                {replyToId && !editingId && (
                   <div className="reply-banner">
                     Replying to {replyToId.slice(0, 8)}…
                     <button type="button" className="secondary" onClick={() => setReplyToId(null)}>
@@ -897,7 +996,7 @@ export function App() {
                   />
                 </label>
                 <button type="button" onClick={() => void send()}>
-                  Send over P2P
+                  {editingId ? "Save edit" : "Send over P2P"}
                 </button>
               </div>
             )}

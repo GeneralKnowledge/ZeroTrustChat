@@ -133,6 +133,40 @@ export class MessagingService {
     );
   }
 
+  async sendEdit(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    targetId: string,
+    body: string,
+  ): Promise<string> {
+    if (!store.applyMessageEdit(targetId, this.identity.peerId, body)) {
+      throw new Error("Can only edit your own messages");
+    }
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "edit", targetId, body },
+      "normal",
+    );
+  }
+
+  async sendPin(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    conversationId: string,
+    targetId: string,
+  ): Promise<string> {
+    const pinned = store.isPinned(conversationId, targetId);
+    const op = pinned ? "clear" : "set";
+    store.applyPin(conversationId, targetId, this.identity.peerId, op);
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "pin", targetId, op },
+      "normal",
+    );
+  }
+
   private async sendDirectApp(
     recipientPeerId: string,
     recipientPublicKey: string,
@@ -339,6 +373,13 @@ function applyIncomingAppEffects(senderId: string, plaintext: string): void {
     const target = store.getMessage(app.targetId);
     if (target && target.senderId === senderId) {
       store.markMessageDeleted(app.targetId);
+    }
+  } else if (app.type === "edit") {
+    store.applyMessageEdit(app.targetId, senderId, app.body);
+  } else if (app.type === "pin") {
+    const target = store.getMessage(app.targetId);
+    if (target) {
+      store.applyPin(target.conversationId, app.targetId, senderId, app.op);
     }
   }
 }
