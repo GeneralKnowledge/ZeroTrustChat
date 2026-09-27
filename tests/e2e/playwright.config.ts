@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: "./specs",
   timeout: 120_000,
   fullyParallel: false,
+  workers: 1,
   retries: 0,
   reporter: "list",
   use: {
@@ -14,6 +15,9 @@ export default defineConfig({
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
         "--enable-features=WebRTC-H264WithOpenH264FFmpeg",
+        // Expose 127.0.0.1 host candidates so same-machine multi-context e2e can connect
+        "--disable-features=WebRtcHideLocalIpsWithMdns",
+        "--enforce-webrtc-ip-permission-check",
       ],
     },
   },

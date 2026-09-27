@@ -86,4 +86,49 @@ describe("compressed group digests", () => {
     expect(digest.senders).toEqual([]);
     expect(digest.messageCount).toBe(1);
   });
+
+  it("multi-sender wants only what remote has", () => {
+    const local = msgs([
+      ["alice", 1],
+      ["bob", 1],
+    ]);
+    const remote = buildGroupDigest(
+      "g1",
+      1,
+      msgs([
+        ["alice", 1],
+        ["alice", 2],
+        ["alice", 3],
+        ["bob", 1],
+        ["carol", 1],
+        ["carol", 2],
+      ]),
+    );
+    const wants = computeWants(local, remote);
+    const bySender = new Map<string, number[]>();
+    for (const w of wants) {
+      const arr = bySender.get(w.senderId) ?? [];
+      arr.push(w.seq);
+      bySender.set(w.senderId, arr);
+    }
+    expect(bySender.get("alice")?.sort((a, b) => a - b)).toEqual([2, 3]);
+    expect(bySender.get("carol")?.sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(bySender.has("bob")).toBe(false);
+  });
+
+  it("gap window: does not want sequences absent from remote", () => {
+    const local = msgs([["alice", 1], ["alice", 5]]);
+    const remote = buildGroupDigest(
+      "g1",
+      1,
+      msgs([
+        ["alice", 1],
+        ["alice", 2],
+        ["alice", 5],
+      ]),
+    );
+    // remote gaps at 3,4 — local should want 2 only, not 3/4
+    const wants = computeWants(local, remote);
+    expect(wants.map((w) => w.seq).sort((a, b) => a - b)).toEqual([2]);
+  });
 });

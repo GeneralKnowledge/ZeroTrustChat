@@ -53,4 +53,28 @@ describe("appMessage", () => {
   it("displayBody unwraps text", () => {
     expect(displayBody(encodeAppMessage({ v: 1, type: "text", body: "yo" }))).toBe("yo");
   });
+
+  it("rejects malformed edit/pin as legacy text (no control injection)", () => {
+    expect(parseAppMessage(JSON.stringify({ v: 1, type: "edit", targetId: 123, body: "x" }))).toEqual({
+      v: 1,
+      type: "text",
+      body: JSON.stringify({ v: 1, type: "edit", targetId: 123, body: "x" }),
+    });
+    expect(parseAppMessage(JSON.stringify({ v: 1, type: "pin", targetId: "m1" /* missing op ok */, op: "set" }))).toEqual({
+      v: 1,
+      type: "pin",
+      targetId: "m1",
+      op: "set",
+    });
+    expect(parseAppMessage(JSON.stringify({ v: 1, type: "pin", op: "set" }))).toEqual({
+      v: 1,
+      type: "text",
+      body: JSON.stringify({ v: 1, type: "pin", op: "set" }),
+    });
+    expect(parseAppMessage(JSON.stringify({ v: 1, type: "edit", targetId: "m1" }))).toEqual({
+      v: 1,
+      type: "text",
+      body: JSON.stringify({ v: 1, type: "edit", targetId: "m1" }),
+    });
+  });
 });
