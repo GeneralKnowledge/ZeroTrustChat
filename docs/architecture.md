@@ -127,6 +127,8 @@ flowchart LR
   M --> Mesh[P2P mesh DataChannels]
 ```
 
+Prototype uses a full mesh for small groups. For large groups (50–500+), see the design in [Distributed group chat](distributed-group-chat.md) (epidemic sparse mesh + soft temporary helpers; not yet implemented).
+
 ## 9. Group membership changes
 
 ```mermaid
@@ -147,6 +149,8 @@ flowchart LR
   Encrypt --> Peers[Send to each online member via P2P]
   Peers --> Offline[Offline members: local retain + sync on reconnect]
 ```
+
+**Prototype:** sender fans out to every online member. **Designed (not implemented):** bounded fanout + gossip + anti-entropy so the central server never distributes group ciphertext — see [Distributed group chat](distributed-group-chat.md).
 
 ## Package boundaries
 
@@ -174,3 +178,4 @@ The prototype uses a **shared AES-256-GCM group key per cryptographic epoch**:
 - Persist prior epoch keys only under explicit policy; currently only the current epoch key is kept locally.
 - Handle concurrent membership changes and partitions.
 - Forward secrecy beyond simple epoch rotation.
+- Scale beyond full mesh using the [distributed group chat design](distributed-group-chat.md).
