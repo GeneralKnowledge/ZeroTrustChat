@@ -21,7 +21,7 @@ import {
   type ServerCapability,
   type ServerToClientMessage,
 } from "@ztc/protocol";
-import type { ConnectionState, ServerStats } from "@ztc/shared";
+import type { ConnectionState, ServerContactStats, ServerStats } from "@ztc/shared";
 
 export type SignallingHandler = (msg: Extract<ServerToClientMessage, { type: "signalling" }>) => void;
 export type PresenceHandler = (msg: Extract<ServerToClientMessage, { type: "presence_update" }>) => void;
@@ -31,6 +31,14 @@ export type PeerHandler = (
     | Extract<ServerToClientMessage, { type: "peer_unavailable" }>,
 ) => void;
 export type RelayHandler = (msg: Extract<ServerToClientMessage, { type: "relay_packet" }>) => void;
+export type IntroHandler = (
+  msg:
+    | Extract<ServerToClientMessage, { type: "intro_claimed" }>
+    | Extract<ServerToClientMessage, { type: "intro_joined" }>
+    | Extract<ServerToClientMessage, { type: "intro_peer_joined" }>
+    | Extract<ServerToClientMessage, { type: "intro_frame" }>
+    | Extract<ServerToClientMessage, { type: "intro_released" }>,
+) => void;
 export type ErrorHandler = (msg: Extract<ServerToClientMessage, { type: "error" }>) => void;
 
 export type ServerSelectionKind = "official" | "community" | "custom";
@@ -91,8 +99,12 @@ export class ServerInterface {
   private readonly presenceHandlers = new Set<PresenceHandler>();
   private readonly peerHandlers = new Set<PeerHandler>();
   private readonly relayHandlers = new Set<RelayHandler>();
+  private readonly introHandlers = new Set<IntroHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly outboundLog: ClientToServerMessage[] = [];
+  /** Count of every outbound WS message — for infrequent-contact monitoring. */
+  private contactTotal = 0;
+  private contactByType = new Map<string, number>();
   private stats: ServerStats | null = null;
   private pending = new Map<string, { resolve: (v: ServerToClientMessage) => void; reject: (e: Error) => void }>();
   private manifest: NetworkManifest | null = null;
@@ -120,6 +132,23 @@ export class ServerInterface {
 
   getOutboundAuditLog(): readonly ClientToServerMessage[] {
     return this.outboundLog;
+  }
+
+  /** How often this client contacted the signalling server (outbound WS messages). */
+  getServerContactStats(): ServerContactStats {
+    const byType: Record<string, number> = {};
+    for (const [k, v] of this.contactByType) byType[k] = v;
+    const statsOnly = this.contactByType.get("get_stats") ?? 0;
+    return {
+      total: this.contactTotal,
+      essential: this.contactTotal - statsOnly,
+      byType,
+    };
+  }
+
+  resetServerContactStats(): void {
+    this.contactTotal = 0;
+    this.contactByType.clear();
   }
 
   getLastServerStats(): ServerStats | null {
@@ -411,6 +440,50 @@ export class ServerInterface {
     return () => this.relayHandlers.delete(handler);
   }
 
+  async introClaim(nameplate: string, expiresAt: number): Promise<void> {
+    this.assertSession();
+    await this.send({
+      type: "intro_claim",
+      sessionId: this.sessionId!,
+      nameplate,
+      expiresAt,
+    });
+  }
+
+  async introJoin(nameplate: string): Promise<void> {
+    this.assertSession();
+    await this.send({
+      type: "intro_join",
+      sessionId: this.sessionId!,
+      nameplate,
+    });
+  }
+
+  async introRelay(nameplate: string, opaquePayload: string): Promise<void> {
+    this.assertSession();
+    assertSafeEphemeralMaterial(opaquePayload);
+    await this.send({
+      type: "intro_relay",
+      sessionId: this.sessionId!,
+      nameplate,
+      opaquePayload,
+    });
+  }
+
+  async introRelease(nameplate: string): Promise<void> {
+    this.assertSession();
+    await this.send({
+      type: "intro_release",
+      sessionId: this.sessionId!,
+      nameplate,
+    });
+  }
+
+  onIntro(handler: IntroHandler): () => void {
+    this.introHandlers.add(handler);
+    return () => this.introHandlers.delete(handler);
+  }
+
   onError(handler: ErrorHandler): () => void {
     this.errorHandlers.add(handler);
     return () => this.errorHandlers.delete(handler);
@@ -433,6 +506,8 @@ export class ServerInterface {
               contactListsReceived: msg.contactListsReceived,
               privateKeysReceived: msg.privateKeysReceived,
               signallingMessagesRelayed: msg.signallingMessagesRelayed,
+              introNameplatesActive: msg.introNameplatesActive,
+              introFramesRelayed: msg.introFramesRelayed,
             };
             this.stats = stats;
             resolve(stats);
@@ -503,6 +578,8 @@ export class ServerInterface {
     this.assertConnected();
     auditOutbound(message);
     this.outboundLog.push(message);
+    this.contactTotal += 1;
+    this.contactByType.set(message.type, (this.contactByType.get(message.type) ?? 0) + 1);
     this.config.onOutbound?.(message);
 
     const validated = parseClientMessage(message);
@@ -544,6 +621,13 @@ export class ServerInterface {
         break;
       case "relay_packet":
         for (const h of this.relayHandlers) h(msg);
+        break;
+      case "intro_claimed":
+      case "intro_joined":
+      case "intro_peer_joined":
+      case "intro_frame":
+      case "intro_released":
+        for (const h of this.introHandlers) h(msg);
         break;
       case "error":
         for (const h of this.errorHandlers) h(msg);

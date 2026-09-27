@@ -131,6 +131,48 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["type", "sessionId", "nameplate", "expiresAt"],
+          "properties": {
+            "type": { "const": "intro_claim" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "nameplate": { "type": "string", "pattern": "^[1-9][0-9]{0,5}$" },
+            "expiresAt": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "nameplate"],
+          "properties": {
+            "type": { "const": "intro_join" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "nameplate": { "type": "string", "pattern": "^[1-9][0-9]{0,5}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "nameplate", "opaquePayload"],
+          "properties": {
+            "type": { "const": "intro_relay" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "nameplate": { "type": "string", "pattern": "^[1-9][0-9]{0,5}$" },
+            "opaquePayload": { "type": "string", "description": "Opaque PAKE / sealed identity only" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "nameplate"],
+          "properties": {
+            "type": { "const": "intro_release" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "nameplate": { "type": "string", "pattern": "^[1-9][0-9]{0,5}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["type", "sessionId"],
           "properties": {
             "type": { "const": "get_stats" },
