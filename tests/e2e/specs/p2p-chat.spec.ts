@@ -83,12 +83,13 @@ test.describe("P2P messaging privacy", () => {
     await alice.getByLabel("Message").fill(queued);
     await alice.getByRole("button", { name: "Send over P2P" }).click();
     await expect(alice.getByText(queued)).toBeVisible({ timeout: 15_000 });
-    // Pending outbox should be visible on the developer dashboard
+    // Pending outbox should be visible (banner and/or Outbox / Pending stats)
+    await expect(alice.getByText(/Local outbox:/)).toBeVisible({ timeout: 10_000 });
     await expect
-      .poll(async () => alice.locator(".stat").filter({ hasText: "Pending" }).locator(".v").textContent(), {
+      .poll(async () => alice.locator(".stat").filter({ hasText: "Outbox" }).locator(".v").textContent(), {
         timeout: 10_000,
       })
-      .not.toMatch(/^0\s*\//);
+      .not.toBe("0");
 
     // Bob returns (same identity) and both re-dial once Bob's session is live
     bob = await bobCtx.newPage();
