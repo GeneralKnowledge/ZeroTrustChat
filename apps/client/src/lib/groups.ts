@@ -288,6 +288,21 @@ export class GroupService {
     return this.sendGroupApp(groupId, { v: 1, type: "delete", targetId });
   }
 
+  sendGroupEdit(groupId: string, targetId: string, body: string): string {
+    if (!store.applyMessageEdit(targetId, this.identity.peerId, body)) {
+      throw new Error("Can only edit your own messages");
+    }
+    return this.sendGroupApp(groupId, { v: 1, type: "edit", targetId, body });
+  }
+
+  sendGroupPin(groupId: string, targetId: string): string {
+    const conversationId = `group:${groupId}`;
+    const pinned = store.isPinned(conversationId, targetId);
+    const op = pinned ? "clear" : "set";
+    store.applyPin(conversationId, targetId, this.identity.peerId, op);
+    return this.sendGroupApp(groupId, { v: 1, type: "pin", targetId, op });
+  }
+
   private sendGroupApp(
     groupId: string,
     app: AppMessage,
@@ -590,6 +605,10 @@ export class GroupService {
         if (target && target.senderId === payload.senderId) {
           store.markMessageDeleted(app.targetId);
         }
+      } else if (app.type === "edit") {
+        store.applyMessageEdit(app.targetId, payload.senderId, app.body);
+      } else if (app.type === "pin") {
+        store.applyPin(`group:${payload.groupId}`, app.targetId, payload.senderId, app.op);
       }
     }
 

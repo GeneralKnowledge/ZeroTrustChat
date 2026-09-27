@@ -33,7 +33,21 @@ describe("appMessage", () => {
       }),
     ).toBe(true);
     expect(isHiddenControlMessage({ v: 1, type: "delete", targetId: "a" })).toBe(true);
+    expect(isHiddenControlMessage({ v: 1, type: "edit", targetId: "a", body: "x" })).toBe(true);
+    expect(isHiddenControlMessage({ v: 1, type: "pin", targetId: "a", op: "set" })).toBe(true);
     expect(isHiddenControlMessage({ v: 1, type: "text", body: "x" })).toBe(false);
+  });
+
+  it("round-trips edit and pin", () => {
+    expect(parseAppMessage(encodeAppMessage({ v: 1, type: "edit", targetId: "m1", body: "new" }))).toEqual({
+      v: 1,
+      type: "edit",
+      targetId: "m1",
+      body: "new",
+    });
+    expect(
+      parseAppMessage(encodeAppMessage({ v: 1, type: "pin", targetId: "m1", op: "clear" })),
+    ).toEqual({ v: 1, type: "pin", targetId: "m1", op: "clear" });
   });
 
   it("displayBody unwraps text", () => {

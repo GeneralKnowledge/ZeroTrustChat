@@ -173,6 +173,13 @@ export async function openLocalStore(): Promise<Database> {
       emoji TEXT NOT NULL,
       PRIMARY KEY (message_id, reactor_id)
     );
+    CREATE TABLE IF NOT EXISTS conversation_pins (
+      conversation_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      pinned_by TEXT NOT NULL,
+      pinned_at INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, message_id)
+    );
   `);
   // Migrations for multi-device + signed epochs (sql.js supports ADD COLUMN).
   const migrations = [
@@ -185,6 +192,13 @@ export async function openLocalStore(): Promise<Database> {
       reactor_id TEXT NOT NULL,
       emoji TEXT NOT NULL,
       PRIMARY KEY (message_id, reactor_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS conversation_pins (
+      conversation_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      pinned_by TEXT NOT NULL,
+      pinned_at INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, message_id)
     )`,
   ];
   for (const sql of migrations) {
@@ -421,6 +435,106 @@ export function markMessageDeleted(messageId: string): void {
     messageId,
   ]);
   persist();
+}
+
+/**
+ * Apply an edit to the local display cache (sender-only).
+ * Original ciphertext is left as-is; peers learn the new body via the edit control message.
+ */
+export function applyMessageEdit(messageId: string, editorId: string, body: string): boolean {
+  const m = getMessage(messageId);
+  if (!m || m.senderId !== editorId || m.status === "deleted") return false;
+  let replyTo: string | undefined;
+  if (m.plaintextCache) {
+    try {
+      const p = JSON.parse(m.plaintextCache) as { type?: string; replyTo?: string };
+      if (p.type === "text" && typeof p.replyTo === "string") replyTo = p.replyTo;
+    } catch {
+      // legacy plaintext — no reply pointer
+    }
+  }
+  const plaintext = JSON.stringify(
+    replyTo
+      ? { v: 1, type: "text", body, replyTo }
+      : { v: 1, type: "text", body },
+  );
+  let meta: Record<string, unknown> = {};
+  try {
+    meta = JSON.parse(m.encryptionMetadata) as Record<string, unknown>;
+  } catch {
+    meta = {};
+  }
+  meta.edited = true;
+  meta.editedAt = Date.now();
+  const d = requireDb();
+  d.run(`UPDATE messages SET plaintext_cache = ?, encryption_metadata = ? WHERE message_id = ?`, [
+    plaintext,
+    JSON.stringify(meta),
+    messageId,
+  ]);
+  persist();
+  return true;
+}
+
+export function isMessageEdited(messageId: string): boolean {
+  const m = getMessage(messageId);
+  if (!m) return false;
+  try {
+    const meta = JSON.parse(m.encryptionMetadata) as { edited?: boolean };
+    return meta.edited === true;
+  } catch {
+    return false;
+  }
+}
+
+export function applyPin(
+  conversationId: string,
+  messageId: string,
+  pinnedBy: string,
+  op: "set" | "clear",
+): void {
+  const d = requireDb();
+  if (op === "clear") {
+    d.run(`DELETE FROM conversation_pins WHERE conversation_id = ? AND message_id = ?`, [
+      conversationId,
+      messageId,
+    ]);
+  } else {
+    d.run(
+      `INSERT OR REPLACE INTO conversation_pins (conversation_id, message_id, pinned_by, pinned_at)
+       VALUES (?, ?, ?, ?)`,
+      [conversationId, messageId, pinnedBy, Date.now()],
+    );
+  }
+  persist();
+}
+
+export function listPins(conversationId: string): Array<{
+  messageId: string;
+  pinnedBy: string;
+  pinnedAt: number;
+}> {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT message_id, pinned_by, pinned_at FROM conversation_pins
+     WHERE conversation_id = ? ORDER BY pinned_at DESC`,
+    [conversationId],
+  );
+  if (!res[0]) return [];
+  return res[0].values.map((v) => ({
+    messageId: String(v[0]),
+    pinnedBy: String(v[1]),
+    pinnedAt: Number(v[2]),
+  }));
+}
+
+export function isPinned(conversationId: string, messageId: string): boolean {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT 1 FROM conversation_pins WHERE conversation_id = ? AND message_id = ?`,
+    [conversationId, messageId],
+  );
+  return Boolean(res[0]?.values[0]);
 }
 
 export function getMessage(messageId: string): StoredMessage | null {
