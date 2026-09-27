@@ -1,0 +1,17 @@
+{
+  "name": "@ztc/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:privacy-scan": "tsx privacy-boundary-scan.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.0",
+    "@types/node": "^22.15.30",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.3",
+    "ws": "^8.18.2"
+  }
+}

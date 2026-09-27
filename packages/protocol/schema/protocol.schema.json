@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ZeroTrustChat Server Protocol",
+  "description": "Machine-readable definition of all client↔server messages. No message storage operations exist.",
+  "definitions": {
+    "sessionId": { "type": "string", "format": "uuid" },
+    "peerId": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "keyId": { "type": "string", "format": "uuid" },
+    "clientMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "peerId", "expiresAt"],
+          "properties": {
+            "type": { "const": "register_session" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "peerId": { "$ref": "#/definitions/peerId" },
+            "expiresAt": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId"],
+          "properties": {
+            "type": { "const": "close_session" },
+            "sessionId": { "$ref": "#/definitions/sessionId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "targetPeerId"],
+          "properties": {
+            "type": { "const": "request_peer" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "targetPeerId": { "$ref": "#/definitions/peerId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "fromPeerId", "toPeerId", "payload"],
+          "properties": {
+            "type": { "const": "signalling" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "fromPeerId": { "$ref": "#/definitions/peerId" },
+            "toPeerId": { "$ref": "#/definitions/peerId" },
+            "payload": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "sdp"],
+                  "properties": {
+                    "kind": { "const": "offer" },
+                    "sdp": { "type": "string" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "sdp"],
+                  "properties": {
+                    "kind": { "const": "answer" },
+                    "sdp": { "type": "string" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "candidate", "sdpMid", "sdpMLineIndex"],
+                  "properties": {
+                    "kind": { "const": "ice_candidate" },
+                    "candidate": { "type": "string" },
+                    "sdpMid": { "type": ["string", "null"] },
+                    "sdpMLineIndex": { "type": ["integer", "null"] }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "peerId", "status"],
+          "properties": {
+            "type": { "const": "presence" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "peerId": { "$ref": "#/definitions/peerId" },
+            "status": { "enum": ["online", "offline"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "keyId", "encryptedKeyMaterial", "expiresAt", "singleUse"],
+          "properties": {
+            "type": { "const": "publish_ephemeral_key" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "keyId": { "$ref": "#/definitions/keyId" },
+            "encryptedKeyMaterial": { "type": "string", "description": "Opaque ciphertext only" },
+            "expiresAt": { "type": "integer" },
+            "singleUse": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "keyId"],
+          "properties": {
+            "type": { "const": "retrieve_ephemeral_key" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "keyId": { "$ref": "#/definitions/keyId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "fromPeerId", "toPeerId", "opaquePayload"],
+          "properties": {
+            "type": { "const": "relay_packet" },
+            "sessionId": { "$ref": "#/definitions/sessionId" },
+            "fromPeerId": { "$ref": "#/definitions/peerId" },
+            "toPeerId": { "$ref": "#/definitions/peerId" },
+            "opaquePayload": { "type": "string", "description": "Opaque ciphertext only" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId"],
+          "properties": {
+            "type": { "const": "get_stats" },
+            "sessionId": { "$ref": "#/definitions/sessionId" }
+          }
+        }
+      ]
+    }
+  },
+  "not": {
+    "properties": {
+      "type": {
+        "enum": [
+          "send_message",
+          "store_message",
+          "store_contact",
+          "store_profile",
+          "upload_history",
+          "upload_private_key",
+          "mailbox_deposit",
+          "mailbox_fetch"
+        ]
+      }
+    }
+  }
+}
