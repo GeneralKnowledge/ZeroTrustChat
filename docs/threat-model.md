@@ -48,6 +48,16 @@ After decryption deadline, keys are destroyed locally. Ciphertext without keys i
 
 Who is online, who requests whom, connection timing — visible to the server. Mitigations (production): shorter sessions, cover traffic, mixnets — not in this prototype.
 
+## Threats (additions for third-party infrastructure)
+
+### Malicious or compromised third-party server
+
+Same blast radius as the official server: may observe signalling metadata and ephemeral opaque blobs. Must not obtain plaintext messages, contacts, or private keys because those never cross the server interface.
+
+### Malicious signed manifest
+
+Clients reject manifests not signed by the embedded developer public key. Compromising the developer private key would allow publishing a malicious server list — protect that key as a release signing secret.
+
 ## Explicit non-claims
 
 We do **not** claim:
