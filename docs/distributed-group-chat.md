@@ -18,19 +18,9 @@ Design for large groups (≈50–500+ members) without full-mesh P2P or central 
 | Signed epochs | Ed25519 announcement + per-member X25519-wrapped epoch key (no raw key flood) |
 | Multi-device | Passphrase-sealed identity backup (shared private keys); per-install `deviceId` for digest seqs |
 
-## Current prototype (what breaks at scale)
+## Current prototype (baseline that pooling replaced)
 
-Today groups are a **full fan-out mesh** (`apps/client/src/lib/groups.ts`):
-
-- `sendGroupMessage` encrypts once, then `p2p.send` to **every** other member.
-- `distributeEpoch` does the same for keys.
-- `P2pManager` keeps **one `RTCPeerConnection` per peer** with no degree cap (`apps/client/src/lib/p2p.ts`).
-- Reconnect repair is push-only: last **50** ciphertexts via `group_sync` (no gap detection / have-want).
-- Crypto is a **shared AES-256-GCM epoch key** rotated on membership change (`packages/crypto`); epoch payloads are unsigned; only the current epoch key is kept locally.
-
-That is correct for tiny prototype groups and wrong for ~100 members (≈99 DataChannels × signalling load on the central server).
-
-Central infrastructure already matches the intended role (signalling / presence / opaque ephemeral keys / rare `relay_packet`) via `@ztc/server-interface`. Group traffic must **not** become a new mailbox there.
+Earlier groups used a **full fan-out mesh**. That path is replaced by the shared pool + gossip implementation above. Remaining gaps vs production: no MLS, no push tickle, concurrent multi-device signalling is last-writer-wins for the same `peerId`.
 
 ## Goals and non-goals
 
