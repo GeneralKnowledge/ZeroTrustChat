@@ -70,4 +70,22 @@ describe("shared connection pool", () => {
   it("default max degree is small vs full mesh", () => {
     expect(DEFAULT_MAX_DEGREE).toBeLessThan(20);
   });
+
+  it("boosts advertised helpers without raising degree budget", () => {
+    const groupsByPeer = new Map<string, string[]>([
+      ["bob", ["g1"]],
+      ["carol", ["g1"]],
+    ]);
+    const ranked = rankPeersForPool({
+      localPeerId: "alice",
+      candidates: ["bob", "carol"],
+      groupsByPeer,
+      connected: new Set(),
+      helperPeers: new Set(["carol"]),
+      timeBucket: 0,
+    });
+    expect(ranked[0]).toBe("carol");
+    const dial = pickPeersToDial(ranked, new Set(), new Set(), 8, 6);
+    expect(dial.length).toBeLessThanOrEqual(6);
+  });
 });

@@ -13,6 +13,10 @@ import {
   decryptGroupMessage,
   encryptGroupMessage,
   generateGroupEpochKey,
+  signEpochAnnouncement,
+  unwrapEpochKeyFromPeer,
+  verifyEpochAnnouncement,
+  wrapEpochKeyForPeer,
   type GroupEpochKey,
 } from "@ztc/crypto";
 import type { P2pManager, P2pEnvelope } from "./p2p";
@@ -34,6 +38,7 @@ import {
   DEFAULT_MAX_DEGREE,
   pickFanoutTargets,
   pickPeersToDial,
+  preferredHelpersForGroup,
   rankPeersForPool,
 } from "./groupTopology";
 
@@ -42,6 +47,8 @@ export interface GroupChatPayload {
   epoch: number;
   messageId: string;
   senderId: string;
+  /** Per-install device — namespaces senderSeq for multi-device same identity. */
+  senderDeviceId: string;
   /** Per-sender monotonic sequence for compressed digests / gap repair. */
   senderSeq: number;
   ciphertext: string;
@@ -54,8 +61,21 @@ export interface GroupEpochPayload {
   groupId: string;
   name: string;
   epoch: number;
+  prevEpoch: number;
   members: string[];
-  epochKeyHex: string;
+  epochId: string;
+  changerId: string;
+  /** Per-member wrapped epoch key (preferred). */
+  wraps: Record<string, string>;
+  signingPublicKey: string;
+  signature: string;
+  /** Legacy plaintext key — only for older peers; omit when wraps present. */
+  epochKeyHex?: string;
+}
+
+export interface GroupCapabilityPayload {
+  canHelper: boolean;
+  updatedAt: number;
 }
 
 export interface GroupSyncPayload {
@@ -95,22 +115,28 @@ export class GroupService {
   /** groupId → max messageCount advertised by any neighbor */
   private neighborEstimates = new Map<string, number>();
   private syncingGroups = new Set<string>();
+  /** Soft helpers learned from capability ads on existing edges only. */
+  private helperPeers = new Set<string>();
 
   constructor(p2p: P2pManager, identity: LocalIdentity) {
     this.p2p = p2p;
     this.identity = identity;
     p2p.onData((from, env) => {
-      if (env.kind === "group_epoch") this.handleEpoch(env.payload as GroupEpochPayload);
+      if (env.kind === "group_epoch") this.handleEpoch(from, env.payload as GroupEpochPayload);
       if (env.kind === "group_chat") this.handleChat(from, env.payload as GroupChatPayload, true);
       if (env.kind === "group_sync") this.handleSync(env.payload as GroupSyncPayload);
       if (env.kind === "group_digest") this.handleDigest(from, env.payload as GroupDigest);
       if (env.kind === "group_want") this.handleWant(from, env.payload as GroupWantPayload);
       if (env.kind === "group_have") this.handleHave(env.payload as GroupHavePayload);
+      if (env.kind === "group_capability") {
+        this.handleCapability(from, env.payload as GroupCapabilityPayload);
+      }
     });
     p2p.onState((peerId, state) => {
       if (state === "connected") {
         this.syncMissedTo(peerId);
         this.sendDigestsTo(peerId);
+        this.sendCapabilityTo(peerId);
       }
     });
   }
@@ -140,12 +166,23 @@ export class GroupService {
 
   /** Shared pool: dial high-value peers across all groups within degree budget. */
   async ensureTopology(): Promise<void> {
+    const bucket = Math.floor(Date.now() / TIME_BUCKET_MS);
     const groups = store.listGroups().map((g) => ({
       groupId: g.groupId,
       members: JSON.parse(g.membersJson) as string[],
+      epoch: g.epoch,
     }));
-    const groupsByPeer = buildGroupsByPeer(this.identity.peerId, groups);
+    const groupsByPeer = buildGroupsByPeer(
+      this.identity.peerId,
+      groups.map((g) => ({ groupId: g.groupId, members: g.members })),
+    );
     const candidates = [...groupsByPeer.keys()];
+    const preferred = new Set<string>();
+    for (const g of groups) {
+      for (const h of preferredHelpersForGroup(g.groupId, g.members, g.epoch, bucket, 2)) {
+        if (h !== this.identity.peerId) preferred.add(h);
+      }
+    }
     const connected = new Set(this.p2p.listConnectedPeers());
     const connecting = new Set(this.p2p.listConnectingPeers());
     const ranked = rankPeersForPool({
@@ -153,7 +190,9 @@ export class GroupService {
       candidates,
       groupsByPeer,
       connected,
-      timeBucket: Math.floor(Date.now() / TIME_BUCKET_MS),
+      helperPeers: this.helperPeers,
+      preferredHelpers: preferred,
+      timeBucket: bucket,
     });
     const toDial = pickPeersToDial(ranked, connected, connecting, DEFAULT_MAX_DEGREE);
     if (toDial.length > 0) {
@@ -232,12 +271,14 @@ export class GroupService {
     const now = Date.now();
     const deliveryDeadline = deliveryDeadlineMs !== undefined ? now + deliveryDeadlineMs : null;
     const senderSeq = this.nextSenderSeq(groupId);
+    const senderDeviceId = this.identity.deviceId;
 
     const payload: GroupChatPayload = {
       groupId,
       epoch: g.epoch,
       messageId,
       senderId: this.identity.peerId,
+      senderDeviceId,
       senderSeq,
       ciphertext: enc.ciphertext,
       nonce: enc.nonce,
@@ -261,6 +302,7 @@ export class GroupService {
         algorithm: "AES-256-GCM",
         version: 1,
         senderSeq,
+        senderDeviceId,
       }),
       wrappedKey: null,
       securityMode: "normal",
@@ -316,18 +358,46 @@ export class GroupService {
   }
 
   private distributeEpoch(name: string, epochKey: GroupEpochKey): void {
-    const payload: GroupEpochPayload = {
+    const prevEpoch = Math.max(0, epochKey.epoch - 1);
+    const epochId = crypto.randomUUID();
+    const fields = {
       groupId: epochKey.groupId,
       name,
       epoch: epochKey.epoch,
+      prevEpoch,
       members: epochKey.memberPeerIds,
-      epochKeyHex: epochKey.key,
+      epochId,
+      changerId: this.identity.peerId,
+    };
+    const wraps: Record<string, string> = {};
+    for (const member of epochKey.memberPeerIds) {
+      const contact = store.listContacts().find((c) => c.peerId === member);
+      const recipientPub =
+        member === this.identity.peerId ? this.identity.publicKey : contact?.publicKey;
+      if (!recipientPub) continue;
+      wraps[member] = wrapEpochKeyForPeer(
+        epochKey.key,
+        this.identity.privateKey,
+        recipientPub,
+      );
+    }
+    // Always wrap for self
+    wraps[this.identity.peerId] = wrapEpochKeyForPeer(
+      epochKey.key,
+      this.identity.privateKey,
+      this.identity.publicKey,
+    );
+
+    const payload: GroupEpochPayload = {
+      ...fields,
+      wraps,
+      signingPublicKey: this.identity.signingPublicKey,
+      signature: signEpochAnnouncement(fields, this.identity.signingPrivateKey),
     };
     const envelope: P2pEnvelope = { v: 1, kind: "group_epoch", payload };
     const connected = epochKey.memberPeerIds.filter(
       (m) => m !== this.identity.peerId && this.p2p.isConnected(m),
     );
-    // Epoch is small control traffic — push on all live edges for fast membership convergence.
     for (const member of connected) {
       this.p2p.send(member, envelope);
     }
@@ -347,7 +417,33 @@ export class GroupService {
     }
   }
 
-  private handleEpoch(payload: GroupEpochPayload): void {
+  private handleEpoch(_from: string, payload: GroupEpochPayload): void {
+    const fields = {
+      groupId: payload.groupId,
+      name: payload.name,
+      epoch: payload.epoch,
+      prevEpoch: payload.prevEpoch ?? payload.epoch - 1,
+      members: payload.members,
+      epochId: payload.epochId ?? `${payload.groupId}:${payload.epoch}`,
+      changerId: payload.changerId ?? _from,
+    };
+
+    // Signed epochs preferred; accept legacy unsigned only if epochKeyHex present and no signature.
+    if (payload.signature && payload.signingPublicKey) {
+      if (!verifyEpochAnnouncement(fields, payload.signature, payload.signingPublicKey)) {
+        return;
+      }
+      const contact = store.listContacts().find((c) => c.peerId === fields.changerId);
+      if (contact?.signingPublicKey && contact.signingPublicKey !== payload.signingPublicKey) {
+        return;
+      }
+      if (contact && !contact.signingPublicKey) {
+        store.upsertContact({ ...contact, signingPublicKey: payload.signingPublicKey });
+      }
+    } else if (!payload.epochKeyHex) {
+      return;
+    }
+
     if (!payload.members.includes(this.identity.peerId)) {
       const existing = store.getGroup(payload.groupId);
       if (existing) {
@@ -361,14 +457,36 @@ export class GroupService {
       this.notify();
       return;
     }
+
     const existing = store.getGroup(payload.groupId);
     if (existing && existing.epoch > payload.epoch) return;
+
+    let epochKeyHex = "";
+    if (payload.wraps?.[this.identity.peerId]) {
+      try {
+        const senderPub =
+          store.listContacts().find((c) => c.peerId === fields.changerId)?.publicKey ??
+          (fields.changerId === this.identity.peerId ? this.identity.publicKey : null);
+        if (senderPub) {
+          epochKeyHex = unwrapEpochKeyFromPeer(
+            payload.wraps[this.identity.peerId]!,
+            this.identity.privateKey,
+            senderPub,
+          );
+        }
+      } catch {
+        epochKeyHex = "";
+      }
+    } else if (payload.epochKeyHex) {
+      epochKeyHex = payload.epochKeyHex;
+    }
+
     store.saveGroup({
       groupId: payload.groupId,
       name: payload.name,
       epoch: payload.epoch,
       membersJson: JSON.stringify(payload.members),
-      epochKeyHex: payload.epochKeyHex,
+      epochKeyHex,
       createdAt: existing?.createdAt ?? Date.now(),
     });
     this.notify();
@@ -400,6 +518,7 @@ export class GroupService {
     }
 
     const senderSeq = payload.senderSeq ?? 0;
+    const senderDeviceId = payload.senderDeviceId ?? payload.senderId;
     store.saveMessage({
       messageId: payload.messageId,
       conversationId: `group:${payload.groupId}`,
@@ -416,6 +535,7 @@ export class GroupService {
         algorithm: "AES-256-GCM",
         version: 1,
         senderSeq,
+        senderDeviceId,
       }),
       wrappedKey: null,
       securityMode: "normal",
@@ -428,7 +548,7 @@ export class GroupService {
       this.gossipToNeighbors(
         payload.groupId,
         members,
-        { ...payload, senderSeq },
+        { ...payload, senderSeq, senderDeviceId },
         new Set([from, this.identity.peerId, payload.senderId]),
       );
     }
@@ -454,16 +574,11 @@ export class GroupService {
 
     // Push newer epoch if we are ahead
     if (g.epoch > remote.epoch && g.epochKeyHex) {
-      this.p2p.send(from, {
-        v: 1,
-        kind: "group_epoch",
-        payload: {
-          groupId: g.groupId,
-          name: g.name,
-          epoch: g.epoch,
-          members,
-          epochKeyHex: g.epochKeyHex,
-        } satisfies GroupEpochPayload,
+      this.distributeEpoch(g.name, {
+        groupId: g.groupId,
+        epoch: g.epoch,
+        key: g.epochKeyHex,
+        memberPeerIds: members,
       });
     }
 
@@ -523,9 +638,15 @@ export class GroupService {
       );
       if (connected.length === 0) continue;
       const digest = buildGroupDigest(g.groupId, g.epoch, this.indexGroupMessages(g.groupId));
-      const envelope: P2pEnvelope = { v: 1, kind: "group_digest", payload: digest };
+      const digestEnv: P2pEnvelope = { v: 1, kind: "group_digest", payload: digest };
+      const capEnv: P2pEnvelope = {
+        v: 1,
+        kind: "group_capability",
+        payload: this.localCapability() satisfies GroupCapabilityPayload,
+      };
       for (const peer of pickFanoutTargets(connected)) {
-        this.p2p.send(peer, envelope);
+        this.p2p.send(peer, digestEnv);
+        this.p2p.send(peer, capEnv);
       }
     }
   }
@@ -537,6 +658,24 @@ export class GroupService {
       const digest = buildGroupDigest(g.groupId, g.epoch, this.indexGroupMessages(g.groupId));
       this.p2p.send(peerId, { v: 1, kind: "group_digest", payload: digest });
     }
+  }
+
+  private sendCapabilityTo(peerId: string): void {
+    this.p2p.send(peerId, {
+      v: 1,
+      kind: "group_capability",
+      payload: this.localCapability() satisfies GroupCapabilityPayload,
+    });
+  }
+
+  private handleCapability(from: string, payload: GroupCapabilityPayload): void {
+    if (payload.canHelper) this.helperPeers.add(from);
+    else this.helperPeers.delete(from);
+  }
+
+  /** Desktop / non-metered prototype default: willing to help within pool budget. */
+  private localCapability(): GroupCapabilityPayload {
+    return { canHelper: true, updatedAt: Date.now() };
   }
 
   private gossipToNeighbors(
@@ -590,6 +729,7 @@ export class GroupService {
       candidates: members.filter((m) => m !== this.identity.peerId),
       groupsByPeer: buildGroupsByPeer(this.identity.peerId, groups),
       connected: new Set(this.p2p.listConnectedPeers()),
+      helperPeers: this.helperPeers,
       timeBucket: Math.floor(Date.now() / TIME_BUCKET_MS),
     });
   }
@@ -598,8 +738,9 @@ export class GroupService {
     let max = 0;
     for (const m of store.listMessages(`group:${groupId}`)) {
       if (m.senderId !== this.identity.peerId) continue;
-      const seq = readSenderSeq(m);
-      if (seq > max) max = seq;
+      const meta = readMeta(m);
+      if (meta.senderDeviceId && meta.senderDeviceId !== this.identity.deviceId) continue;
+      if (meta.senderSeq > max) max = meta.senderSeq;
     }
     return max + 1;
   }
@@ -608,12 +749,17 @@ export class GroupService {
     return store
       .listMessages(`group:${groupId}`)
       .filter((m) => m.status !== "expired")
-      .map((m) => ({
-        messageId: m.messageId,
-        senderId: m.senderId,
-        senderSeq: readSenderSeq(m),
-        epoch: Number(m.messageKeyId.split(":epoch:")[1] ?? 0),
-      }));
+      .map((m) => {
+        const meta = readMeta(m);
+        const device = meta.senderDeviceId || m.senderId;
+        return {
+          messageId: m.messageId,
+          // Device-scoped digest key so multi-device same identity does not clash seqs
+          senderId: `${m.senderId}/${device}`,
+          senderSeq: meta.senderSeq,
+          epoch: Number(m.messageKeyId.split(":epoch:")[1] ?? 0),
+        };
+      });
   }
 
   private recentPayloads(groupId: string, limit: number): GroupChatPayload[] {
@@ -633,8 +779,10 @@ export class GroupService {
     const out: GroupChatPayload[] = [];
     for (const m of store.listMessages(`group:${groupId}`)) {
       if (m.status === "expired") continue;
-      const seq = readSenderSeq(m);
-      if (!want.has(indexKey(m.senderId, seq))) continue;
+      const meta = readMeta(m);
+      const device = meta.senderDeviceId || m.senderId;
+      const digestSender = `${m.senderId}/${device}`;
+      if (!want.has(indexKey(digestSender, meta.senderSeq))) continue;
       out.push(storedToPayload(m, g.groupId, g.epoch));
       if (out.length >= HAVE_BATCH_LIMIT) break;
     }
@@ -642,22 +790,30 @@ export class GroupService {
   }
 }
 
-function readSenderSeq(m: StoredMessage): number {
+function readMeta(m: StoredMessage): { senderSeq: number; senderDeviceId: string } {
   try {
-    const meta = JSON.parse(m.encryptionMetadata) as { senderSeq?: number };
-    return typeof meta.senderSeq === "number" ? meta.senderSeq : 0;
+    const meta = JSON.parse(m.encryptionMetadata) as {
+      senderSeq?: number;
+      senderDeviceId?: string;
+    };
+    return {
+      senderSeq: typeof meta.senderSeq === "number" ? meta.senderSeq : 0,
+      senderDeviceId: typeof meta.senderDeviceId === "string" ? meta.senderDeviceId : "",
+    };
   } catch {
-    return 0;
+    return { senderSeq: 0, senderDeviceId: "" };
   }
 }
 
 function storedToPayload(m: StoredMessage, groupId: string, fallbackEpoch: number): GroupChatPayload {
+  const meta = readMeta(m);
   return {
     groupId,
     epoch: Number(m.messageKeyId.split(":epoch:")[1] ?? fallbackEpoch),
     messageId: m.messageId,
     senderId: m.senderId,
-    senderSeq: readSenderSeq(m),
+    senderDeviceId: meta.senderDeviceId || m.senderId,
+    senderSeq: meta.senderSeq,
     ciphertext: m.ciphertext,
     nonce: m.nonce,
     createdAt: m.createdAt,

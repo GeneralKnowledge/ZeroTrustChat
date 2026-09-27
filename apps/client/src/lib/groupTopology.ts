@@ -19,24 +19,35 @@ export interface PeerRankInput {
   groupsByPeer: Map<string, string[]>;
   /** Currently open DataChannels */
   connected: ReadonlySet<string>;
+  /** Soft helpers advertised over existing edges (bonus only — no extra dials beyond budget). */
+  helperPeers?: ReadonlySet<string>;
+  /** Deterministic preferred helpers for active groups (still within degree budget). */
+  preferredHelpers?: ReadonlySet<string>;
   /** Optional time bucket (e.g. floor(now / 10min)) for mild rotation */
   timeBucket?: number;
 }
 
 /**
  * Rank peers for the shared pool. Higher score = more valuable edge.
- * Prefers: already connected, covers more groups, stable hash mix for spread.
+ * Prefers: already connected, covers more groups, soft helpers, stable hash mix.
  */
 export function rankPeersForPool(input: PeerRankInput): string[] {
   const bucket = input.timeBucket ?? 0;
+  const helpers = input.helperPeers ?? new Set<string>();
+  const preferred = input.preferredHelpers ?? new Set<string>();
   const scored = input.candidates
     .filter((p) => p !== input.localPeerId)
     .map((peerId) => {
       const groups = input.groupsByPeer.get(peerId) ?? [];
       const connectedBonus = input.connected.has(peerId) ? 1000 : 0;
       const coverage = groups.length * 10;
+      const helperBonus = helpers.has(peerId) ? 40 : 0;
+      const preferredBonus = preferred.has(peerId) ? 25 : 0;
       const rotate = hashMix(`${input.localPeerId}|${peerId}|${bucket}`) % 7;
-      return { peerId, score: connectedBonus + coverage + rotate };
+      return {
+        peerId,
+        score: connectedBonus + coverage + helperBonus + preferredBonus + rotate,
+      };
     });
   scored.sort((a, b) => b.score - a.score || a.peerId.localeCompare(b.peerId));
   return scored.map((s) => s.peerId);
@@ -100,6 +111,24 @@ export function buildGroupsByPeer(
     }
   }
   return map;
+}
+
+/** Deterministic soft-helper candidates — preference only, not a permanent server role. */
+export function preferredHelpersForGroup(
+  groupId: string,
+  members: string[],
+  epoch: number,
+  timeBucket: number,
+  count = 2,
+): string[] {
+  return [...members]
+    .map((peerId) => ({
+      peerId,
+      h: hashMix(`${groupId}|${epoch}|${timeBucket}|${peerId}`),
+    }))
+    .sort((a, b) => a.h - b.h || a.peerId.localeCompare(b.peerId))
+    .slice(0, count)
+    .map((x) => x.peerId);
 }
 
 function hashMix(s: string): number {

@@ -2,7 +2,7 @@
 
 Design for large groups (≈50–500+ members) without full-mesh P2P or central message distribution.
 
-**Status:** shared **connection pooling** and **compressed digests** are implemented in the client (`groupTopology.ts`, `groupDigest.ts`, `GroupService`). Soft temporary helpers, signed epoch key-wrap, and MLS remain design-only.
+**Status:** shared **connection pooling**, **compressed digests**, **signed epoch key-wrap**, **soft helper preference (within pool budget)**, and **passphrase identity backup** (simple multi-device) are implemented. Soft helpers never open edges beyond the device degree cap. MLS and push tickles remain out of scope.
 
 **Core principle:** do not optimise for instant synchronisation. A group should normally converge within ~2–3 minutes under churn, but propagation is eager on live edges (fanout + immediate forward + ~8s anti-entropy) — delay is not artificial.
 
@@ -14,8 +14,9 @@ Design for large groups (≈50–500+ members) without full-mesh P2P or central 
 | Send path | Encrypt once → fanout ≤3 connected members (not N−1) |
 | Gossip | On receive, forward to other live neighbors (deduped by `messageId`) |
 | Digests | Per-sender `(maxSeq, gaps[])` every ~8s + on connect; `want` / `have` repair |
-| Sync UI | `Synchronising… local/estimate` from neighbor `messageCount` ads |
-| Server | Still signalling only — group ciphertext never uploaded |
+| Soft helpers | Capability ads on existing edges only; ranking bonus inside the same ~8-edge budget |
+| Signed epochs | Ed25519 announcement + per-member X25519-wrapped epoch key (no raw key flood) |
+| Multi-device | Passphrase-sealed identity backup (shared private keys); per-install `deviceId` for digest seqs |
 
 ## Current prototype (what breaks at scale)
 

@@ -20,10 +20,13 @@ import { bytesToHex, hexToBytes, utf8ToBytes, bytesToUtf8 } from "@noble/hashes/
 import { generateDisplayName } from "@ztc/shared";
 
 export interface IdentityKeyPair {
-  publicKey: string; // hex
-  privateKey: string; // hex
+  publicKey: string; // hex X25519
+  privateKey: string; // hex X25519
   peerId: string; // public key hex used as peer identity
   displayName: string;
+  /** Ed25519 — signs group epochs / control messages */
+  signingPublicKey: string;
+  signingPrivateKey: string;
 }
 
 export interface EncryptedMessage {
@@ -65,12 +68,38 @@ export function generateIdentity(): IdentityKeyPair {
   const privateKey = x25519.utils.randomPrivateKey();
   const publicKey = x25519.getPublicKey(privateKey);
   const publicHex = bytesToHex(publicKey);
+  const signing = generateSigningKeyPair();
   const nameBytes = randomBytes(4);
   return {
     publicKey: publicHex,
     privateKey: bytesToHex(privateKey),
     peerId: publicHex,
     displayName: generateDisplayName(nameBytes),
+    signingPublicKey: signing.publicKey,
+    signingPrivateKey: signing.privateKey,
+  };
+}
+
+/** Attach signing keys to an older X25519-only identity. */
+export function ensureSigningKeys(identity: {
+  publicKey: string;
+  privateKey: string;
+  peerId: string;
+  displayName: string;
+  signingPublicKey?: string;
+  signingPrivateKey?: string;
+}): IdentityKeyPair {
+  if (identity.signingPublicKey && identity.signingPrivateKey) {
+    return identity as IdentityKeyPair;
+  }
+  const signing = generateSigningKeyPair();
+  return {
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    peerId: identity.peerId,
+    displayName: identity.displayName,
+    signingPublicKey: signing.publicKey,
+    signingPrivateKey: signing.privateKey,
   };
 }
 
@@ -245,6 +274,132 @@ export function decryptGroupMessage(
 ): string {
   const aes = gcm(hexToBytes(epochKey.key), hexToBytes(encrypted.nonce));
   return bytesToUtf8(aes.decrypt(hexToBytes(encrypted.ciphertext)));
+}
+
+/** Wrap a group epoch AES key for one member (X25519 + AES-GCM). */
+export function wrapEpochKeyForPeer(
+  epochKeyHex: string,
+  senderPrivateKeyHex: string,
+  recipientPublicKeyHex: string,
+): string {
+  const shared = x25519.getSharedSecret(
+    hexToBytes(senderPrivateKeyHex),
+    hexToBytes(recipientPublicKeyHex),
+  );
+  const wrapKey = hkdf(sha256, shared, undefined, utf8ToBytes("ztc-epoch-v1"), 32);
+  const nonce = randomBytes(12);
+  const aes = gcm(wrapKey, nonce);
+  const ct = aes.encrypt(utf8ToBytes(JSON.stringify({ key: epochKeyHex })));
+  return `${bytesToHex(nonce)}.${bytesToHex(ct)}`;
+}
+
+export function unwrapEpochKeyFromPeer(
+  wrapped: string,
+  recipientPrivateKeyHex: string,
+  senderPublicKeyHex: string,
+): string {
+  const [nonceHex, ctHex] = wrapped.split(".");
+  if (!nonceHex || !ctHex) throw new Error("Invalid epoch wrap format");
+  const shared = x25519.getSharedSecret(
+    hexToBytes(recipientPrivateKeyHex),
+    hexToBytes(senderPublicKeyHex),
+  );
+  const wrapKey = hkdf(sha256, shared, undefined, utf8ToBytes("ztc-epoch-v1"), 32);
+  const aes = gcm(wrapKey, hexToBytes(nonceHex));
+  const parsed = JSON.parse(bytesToUtf8(aes.decrypt(hexToBytes(ctHex)))) as { key: string };
+  if (!parsed.key) throw new Error("Epoch wrap missing key");
+  return parsed.key;
+}
+
+export interface EpochAnnouncementFields {
+  groupId: string;
+  name: string;
+  epoch: number;
+  prevEpoch: number;
+  members: string[];
+  epochId: string;
+  changerId: string;
+}
+
+/** Canonical bytes for epoch signatures (stable key order, sorted members). */
+export function canonicalizeEpochAnnouncement(fields: EpochAnnouncementFields): string {
+  return JSON.stringify({
+    groupId: fields.groupId,
+    name: fields.name,
+    epoch: fields.epoch,
+    prevEpoch: fields.prevEpoch,
+    members: [...fields.members].sort(),
+    epochId: fields.epochId,
+    changerId: fields.changerId,
+  });
+}
+
+export function signEpochAnnouncement(
+  fields: EpochAnnouncementFields,
+  signingPrivateKeyHex: string,
+): string {
+  return signMessage(canonicalizeEpochAnnouncement(fields), signingPrivateKeyHex);
+}
+
+export function verifyEpochAnnouncement(
+  fields: EpochAnnouncementFields,
+  signatureHex: string,
+  signingPublicKeyHex: string,
+): boolean {
+  return verifyMessage(canonicalizeEpochAnnouncement(fields), signatureHex, signingPublicKeyHex);
+}
+
+export interface IdentityBackupPayload {
+  v: 1;
+  peerId: string;
+  publicKey: string;
+  privateKey: string;
+  signingPublicKey: string;
+  signingPrivateKey: string;
+  displayName: string;
+}
+
+/**
+ * Passphrase-sealed identity backup for simple multi-device restore.
+ * Does not include per-install deviceId — each device keeps its own.
+ */
+export function sealIdentityBackup(identity: IdentityBackupPayload, passphrase: string): string {
+  if (passphrase.length < 8) throw new Error("Passphrase must be at least 8 characters");
+  const salt = randomBytes(16);
+  const key = hkdf(sha256, utf8ToBytes(passphrase), salt, utf8ToBytes("ztc-identity-backup-v1"), 32);
+  const nonce = randomBytes(12);
+  const aes = gcm(key, nonce);
+  const ct = aes.encrypt(utf8ToBytes(JSON.stringify(identity)));
+  return `ztcbackup1:${btoa(
+    JSON.stringify({
+      salt: bytesToHex(salt),
+      nonce: bytesToHex(nonce),
+      ct: bytesToHex(ct),
+    }),
+  )}`;
+}
+
+export function openIdentityBackup(sealed: string, passphrase: string): IdentityBackupPayload {
+  if (!sealed.startsWith("ztcbackup1:")) throw new Error("Invalid backup format");
+  const parsed = JSON.parse(atob(sealed.slice("ztcbackup1:".length))) as {
+    salt: string;
+    nonce: string;
+    ct: string;
+  };
+  const key = hkdf(
+    sha256,
+    utf8ToBytes(passphrase),
+    hexToBytes(parsed.salt),
+    utf8ToBytes("ztc-identity-backup-v1"),
+    32,
+  );
+  const aes = gcm(key, hexToBytes(parsed.nonce));
+  const plain = bytesToUtf8(aes.decrypt(hexToBytes(parsed.ct)));
+  const identity = JSON.parse(plain) as IdentityBackupPayload;
+  if (identity.v !== 1 || !identity.peerId || !identity.privateKey || !identity.signingPrivateKey) {
+    throw new Error("Malformed identity backup");
+  }
+  return identity;
 }
 
 /** Encrypt opaque key material for ephemeral server storage (already wrapped). */

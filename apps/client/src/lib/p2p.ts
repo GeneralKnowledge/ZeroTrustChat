@@ -16,6 +16,7 @@ export type P2pEnvelopeKind =
   | "group_digest"
   | "group_want"
   | "group_have"
+  | "group_capability"
   | "ack"
   | "ping";
 

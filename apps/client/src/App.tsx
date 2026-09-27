@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent, useState, startTransition } from "react";
-import { generateIdentity } from "@ztc/crypto";
+import {
+  ensureSigningKeys,
+  generateIdentity,
+  openIdentityBackup,
+  sealIdentityBackup,
+} from "@ztc/crypto";
 import { ServerInterface, type SelectedServer } from "@ztc/server-interface";
 import type { ManifestServerEntry } from "@ztc/protocol";
 import type { SecurityMode, ServerStats } from "@ztc/shared";
@@ -39,6 +44,10 @@ export function App() {
   const [customKey, setCustomKey] = useState("");
   const [bootstrapNote, setBootstrapNote] = useState<string>("");
   const [switching, setSwitching] = useState(false);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [backupBlob, setBackupBlob] = useState("");
+  const [importBlob, setImportBlob] = useState("");
+  const [importPassphrase, setImportPassphrase] = useState("");
 
   const refresh = useEffectEvent(() => {
     startTransition(() => setTick((t) => t + 1));
@@ -57,8 +66,23 @@ export function App() {
             publicKey: gen.publicKey,
             privateKey: gen.privateKey,
             displayName: gen.displayName,
+            signingPublicKey: gen.signingPublicKey,
+            signingPrivateKey: gen.signingPrivateKey,
+            deviceId: crypto.randomUUID(),
           };
           store.saveIdentity(identity);
+        } else {
+          const ensured = ensureSigningKeys(identity);
+          const deviceId = identity.deviceId || crypto.randomUUID();
+          if (
+            !identity.signingPublicKey ||
+            !identity.signingPrivateKey ||
+            !identity.deviceId ||
+            ensured.signingPublicKey !== identity.signingPublicKey
+          ) {
+            identity = { ...ensured, deviceId };
+            store.saveIdentity(identity);
+          }
         }
 
         const savedNet = store.getNetworkConfig();
@@ -242,6 +266,7 @@ export function App() {
         ...decoded,
         invitationCode: inviteInput.trim(),
         addedAt: Date.now(),
+        signingPublicKey: decoded.signingPublicKey,
       });
       setInviteInput("");
       setActivePeer(decoded.peerId);
@@ -384,6 +409,9 @@ export function App() {
               <span className="pill">{identity.displayName}</span>
             </div>
             <div className="mono">{identity.peerId.slice(0, 24)}…</div>
+            <div className="mono" style={{ color: "var(--muted)" }}>
+              device {identity.deviceId.slice(0, 8)}…
+            </div>
             <label>
               Your invitation (copy/paste)
               <textarea readOnly rows={3} value={invitation} />
@@ -394,6 +422,94 @@ export function App() {
               onClick={() => void navigator.clipboard.writeText(invitation)}
             >
               Copy invite
+            </button>
+            <h3 style={{ marginBottom: 0 }}>Multi-device (shared keys)</h3>
+            <p className="mono" style={{ color: "var(--muted)", margin: 0 }}>
+              Export sealed identity keys to another install. Same peerId; each device keeps its own
+              deviceId. Prefer one online at a time for signalling.
+            </p>
+            <label>
+              Passphrase (≥8 chars)
+              <input
+                type="password"
+                value={backupPassphrase}
+                onChange={(e) => setBackupPassphrase(e.target.value)}
+                autoComplete="new-password"
+              />
+            </label>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                try {
+                  const sealed = sealIdentityBackup(
+                    {
+                      v: 1,
+                      peerId: identity.peerId,
+                      publicKey: identity.publicKey,
+                      privateKey: identity.privateKey,
+                      signingPublicKey: identity.signingPublicKey,
+                      signingPrivateKey: identity.signingPrivateKey,
+                      displayName: identity.displayName,
+                    },
+                    backupPassphrase,
+                  );
+                  setBackupBlob(sealed);
+                  setError(null);
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Backup failed");
+                }
+              }}
+            >
+              Export sealed backup
+            </button>
+            {backupBlob && (
+              <label>
+                Backup blob
+                <textarea readOnly rows={3} value={backupBlob} />
+              </label>
+            )}
+            <label>
+              Import backup blob
+              <textarea
+                rows={3}
+                value={importBlob}
+                onChange={(e) => setImportBlob(e.target.value)}
+                placeholder="ztcbackup1:..."
+              />
+            </label>
+            <label>
+              Import passphrase
+              <input
+                type="password"
+                value={importPassphrase}
+                onChange={(e) => setImportPassphrase(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                try {
+                  const opened = openIdentityBackup(importBlob.trim(), importPassphrase);
+                  store.saveIdentity({
+                    peerId: opened.peerId,
+                    publicKey: opened.publicKey,
+                    privateKey: opened.privateKey,
+                    displayName: opened.displayName,
+                    signingPublicKey: opened.signingPublicKey,
+                    signingPrivateKey: opened.signingPrivateKey,
+                    deviceId: crypto.randomUUID(),
+                  });
+                  setError(null);
+                  window.location.reload();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Import failed");
+                }
+              }}
+            >
+              Import & reload
             </button>
           </section>
 
