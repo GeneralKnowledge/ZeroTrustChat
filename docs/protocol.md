@@ -14,6 +14,7 @@ Machine-readable schema: `packages/protocol/schema/protocol.schema.json`
 
 | type | Purpose |
 |------|---------|
+| `hello` | Protocol version + expect signed `server_info` |
 | `register_session` | Bind ephemeral session + peerId |
 | `close_session` | Tear down |
 | `request_peer` | Is peer online? |
@@ -39,11 +40,16 @@ upload_history, upload_private_key, mailbox_deposit, mailbox_fetch
 
 ## Server → client
 
-`session_registered`, `peer_available`, `peer_unavailable`, `signalling`,
+`server_info`, `session_registered`, `peer_available`, `peer_unavailable`, `signalling`,
 `presence_update`, `ephemeral_key_stored`, `ephemeral_key_retrieved`,
 `ephemeral_key_missing`, `relay_packet`, `error`, `server_stats`
 
 `server_stats.messagesStored` is always literal `0`.
+
+## Network manifest (HTTP bootstrap)
+
+`GET /manifest` returns a developer-signed JSON document (see `docs/third-party-servers.md`).
+Not a WebSocket message; fetched only via `@ztc/server-interface.fetchNetworkManifest`.
 
 ## Signalling payload
 

@@ -65,6 +65,7 @@ pnpm test:e2e       # Playwright (server must be available or harness starts it)
 - [Privacy model](docs/privacy-model.md)
 - [Threat model](docs/threat-model.md)
 - [Development vs production](docs/development-vs-production.md)
+- [Third-party servers](docs/third-party-servers.md)
 - [Server interface README](packages/server-interface/README.md)
 
 ## Intentionally not built

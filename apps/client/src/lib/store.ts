@@ -150,6 +150,18 @@ export async function openLocalStore(): Promise<Database> {
       delivery_deadline INTEGER,
       retention_deadline INTEGER
     );
+    CREATE TABLE IF NOT EXISTS network_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      bootstrap_http_url TEXT NOT NULL,
+      selected_kind TEXT NOT NULL,
+      selected_ws_url TEXT NOT NULL,
+      selected_http_url TEXT,
+      selected_server_id TEXT,
+      selected_display_name TEXT NOT NULL,
+      selected_public_key TEXT,
+      manifest_json TEXT,
+      updated_at INTEGER NOT NULL
+    );
   `);
   persist();
   return db;
@@ -493,4 +505,61 @@ export function decodeInvitation(code: string): Omit<Contact, "addedAt" | "invit
     publicKey: parsed.publicKey,
     displayName: parsed.displayName,
   };
+}
+
+export interface StoredNetworkConfig {
+  bootstrapHttpUrl: string;
+  selectedKind: "official" | "community" | "custom";
+  selectedWsUrl: string;
+  selectedHttpUrl: string | null;
+  selectedServerId: string | null;
+  selectedDisplayName: string;
+  selectedPublicKey: string | null;
+  manifestJson: string | null;
+  updatedAt: number;
+}
+
+export function getNetworkConfig(): StoredNetworkConfig | null {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT bootstrap_http_url, selected_kind, selected_ws_url, selected_http_url,
+            selected_server_id, selected_display_name, selected_public_key, manifest_json, updated_at
+     FROM network_config WHERE id = 1`,
+  );
+  if (!res[0]?.values[0]) return null;
+  const v = res[0].values[0];
+  return {
+    bootstrapHttpUrl: String(v[0]),
+    selectedKind: String(v[1]) as StoredNetworkConfig["selectedKind"],
+    selectedWsUrl: String(v[2]),
+    selectedHttpUrl: v[3] == null ? null : String(v[3]),
+    selectedServerId: v[4] == null ? null : String(v[4]),
+    selectedDisplayName: String(v[5]),
+    selectedPublicKey: v[6] == null ? null : String(v[6]),
+    manifestJson: v[7] == null ? null : String(v[7]),
+    updatedAt: Number(v[8]),
+  };
+}
+
+export function saveNetworkConfig(cfg: StoredNetworkConfig): void {
+  const d = requireDb();
+  d.run("DELETE FROM network_config");
+  d.run(
+    `INSERT INTO network_config (
+      id, bootstrap_http_url, selected_kind, selected_ws_url, selected_http_url,
+      selected_server_id, selected_display_name, selected_public_key, manifest_json, updated_at
+    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      cfg.bootstrapHttpUrl,
+      cfg.selectedKind,
+      cfg.selectedWsUrl,
+      cfg.selectedHttpUrl,
+      cfg.selectedServerId,
+      cfg.selectedDisplayName,
+      cfg.selectedPublicKey,
+      cfg.manifestJson,
+      cfg.updatedAt,
+    ],
+  );
+  persist();
 }

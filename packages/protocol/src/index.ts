@@ -115,7 +115,15 @@ export const GetStatsSchema = strictObject({
   sessionId: SessionIdSchema,
 });
 
+/** Client hello — verify protocol compatibility before registering a session. */
+export const HelloSchema = strictObject({
+  type: z.literal("hello"),
+  protocolVersion: z.number().int().positive(),
+  clientVersion: z.string().min(1).max(32),
+});
+
 export const ClientToServerSchema = z.discriminatedUnion("type", [
+  HelloSchema,
   RegisterSessionSchema,
   CloseSessionSchema,
   RequestPeerSchema,
@@ -194,6 +202,7 @@ export const ErrorSchema = strictObject({
     "session_not_found",
     "peer_not_found",
     "rate_limited",
+    "protocol_mismatch",
     "internal",
   ]),
   message: z.string().max(500),
@@ -210,7 +219,30 @@ export const ServerStatsSchema = strictObject({
   signallingMessagesRelayed: z.number().int().nonnegative(),
 });
 
+export const ServerCapabilitySchema = z.enum([
+  "signalling",
+  "rendezvous",
+  "ephemeral_keys",
+  "relay",
+  "stun",
+  "turn",
+]);
+
+export type ServerCapability = z.infer<typeof ServerCapabilitySchema>;
+
+export const ServerInfoSchema = strictObject({
+  type: z.literal("server_info"),
+  serverId: z.string().min(8).max(128),
+  displayName: z.string().min(1).max(128),
+  publicKey: z.string().min(64).max(128),
+  protocolVersion: z.number().int().positive(),
+  capabilities: z.array(ServerCapabilitySchema).min(1),
+  /** Ed25519 signature over canonical server info payload (hex). */
+  signature: z.string().min(64).max(256),
+});
+
 export const ServerToClientSchema = z.discriminatedUnion("type", [
+  ServerInfoSchema,
   SessionRegisteredSchema,
   PeerAvailableSchema,
   PeerUnavailableSchema,
@@ -276,6 +308,7 @@ export function parseServerMessage(raw: unknown): ParseResult<ServerToClientMess
 
 /** Allowed top-level field names per client message type — for audit tests. */
 export const ALLOWED_CLIENT_FIELDS: Record<string, readonly string[]> = {
+  hello: ["type", "protocolVersion", "clientVersion"],
   register_session: ["type", "sessionId", "peerId", "expiresAt"],
   close_session: ["type", "sessionId"],
   request_peer: ["type", "sessionId", "targetPeerId"],
@@ -293,6 +326,77 @@ export const ALLOWED_CLIENT_FIELDS: Record<string, readonly string[]> = {
   relay_packet: ["type", "sessionId", "fromPeerId", "toPeerId", "opaquePayload"],
   get_stats: ["type", "sessionId"],
 };
+
+/** Current wire protocol version for hello handshake. */
+export const PROTOCOL_VERSION = 1;
+
+/** Minimum client version string the official network expects. */
+export const MIN_CLIENT_VERSION = "0.1.0";
+
+export const ManifestServerEntrySchema = strictObject({
+  serverId: z.string().min(8).max(128),
+  displayName: z.string().min(1).max(128),
+  /** WebSocket signalling URL */
+  wsUrl: z.string().url().max(512),
+  /** Optional HTTPS bootstrap / health base (same host typically) */
+  httpUrl: z.string().url().max(512).optional(),
+  /** Ed25519 public key hex of this server's identity */
+  publicKey: z.string().min(64).max(128),
+  capabilities: z.array(ServerCapabilitySchema).min(1),
+  official: z.boolean().optional(),
+  community: z.boolean().optional(),
+});
+
+export type ManifestServerEntry = z.infer<typeof ManifestServerEntrySchema>;
+
+/**
+ * Unsigned body of the network manifest (signed by the developer key).
+ * Does NOT contain messages, contacts, or private user data.
+ */
+export const NetworkManifestBodySchema = strictObject({
+  protocolVersion: z.number().int().positive(),
+  manifestVersion: z.number().int().positive(),
+  developerPublicKey: z.string().min(64).max(128),
+  minClientVersion: z.string().min(1).max(32),
+  issuedAt: z.number().int().positive(),
+  expiresAt: z.number().int().positive(),
+  servers: z.array(ManifestServerEntrySchema).min(1).max(64),
+});
+
+export type NetworkManifestBody = z.infer<typeof NetworkManifestBodySchema>;
+
+export const NetworkManifestSchema = NetworkManifestBodySchema.extend({
+  /** Ed25519 signature over canonical body JSON (hex). */
+  signature: z.string().min(64).max(256),
+}).strict();
+
+export type NetworkManifest = z.infer<typeof NetworkManifestSchema>;
+
+export function parseNetworkManifest(raw: unknown): ParseResult<NetworkManifest> {
+  const result = NetworkManifestSchema.safeParse(raw);
+  if (!result.success) {
+    return { ok: false, error: result.error.message, code: "invalid_schema" };
+  }
+  return { ok: true, value: result.data };
+}
+
+/** Canonical JSON for signatures — sorted keys, no whitespace. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      out[key] = sortKeys(obj[key]);
+    }
+    return out;
+  }
+  return value;
+}
 
 /** Fields that must NEVER appear in any client→server message. */
 export const FORBIDDEN_FIELD_NAMES = [

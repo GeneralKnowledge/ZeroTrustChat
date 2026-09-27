@@ -13,7 +13,7 @@
  */
 
 import { gcm } from "@noble/ciphers/aes.js";
-import { x25519 } from "@noble/curves/ed25519.js";
+import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes, bytesToUtf8 } from "@noble/hashes/utils.js";
@@ -261,5 +261,42 @@ export function fromBase64(b64: string): string {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytesToHex(bytes);
 }
+
+export interface Ed25519KeyPair {
+  publicKey: string; // hex
+  privateKey: string; // hex
+}
+
+export function generateSigningKeyPair(): Ed25519KeyPair {
+  const privateKey = ed25519.utils.randomPrivateKey();
+  const publicKey = ed25519.getPublicKey(privateKey);
+  return { privateKey: bytesToHex(privateKey), publicKey: bytesToHex(publicKey) };
+}
+
+/** Sign an arbitrary UTF-8 message (typically canonical JSON). */
+export function signMessage(message: string, privateKeyHex: string): string {
+  const sig = ed25519.sign(utf8ToBytes(message), hexToBytes(privateKeyHex));
+  return bytesToHex(sig);
+}
+
+export function verifyMessage(
+  message: string,
+  signatureHex: string,
+  publicKeyHex: string,
+): boolean {
+  try {
+    return ed25519.verify(hexToBytes(signatureHex), utf8ToBytes(message), hexToBytes(publicKeyHex));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prototype-only developer public key embedded in official clients.
+ * Used to verify signed network manifests. Private key lives only on the
+ * official bootstrap server (see apps/server). Rotate for production.
+ */
+export const EMBEDDED_DEVELOPER_PUBLIC_KEY =
+  "7133411ff89d3983863648858ded072bcdfd9bc3e230150af0c22aff00c37513";
 
 export { bytesToHex, hexToBytes, uuid, randomBytes };

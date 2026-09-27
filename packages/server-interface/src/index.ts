@@ -1,19 +1,25 @@
 /**
- * @ztc/server-interface — the ONLY module permitted to talk to central infrastructure.
+ * Signed network manifest bootstrap + third-party server selection.
  *
- * All other client code (chat, crypto, contacts, messages, groups) must go through
- * this boundary. This package is designed to be independently open-sourced and audited.
- *
- * See README.md for the full allowlist of what may cross this boundary.
+ * ALL infrastructure HTTP/WebSocket for bootstrap and signalling stays here.
+ * Chat/crypto/contacts modules must not call fetch/WebSocket directly.
  */
 
+import { EMBEDDED_DEVELOPER_PUBLIC_KEY, verifyMessage } from "@ztc/crypto";
 import {
-  type ClientToServerMessage,
-  type ServerToClientMessage,
-  FORBIDDEN_FIELD_NAMES,
   ALLOWED_CLIENT_FIELDS,
+  FORBIDDEN_FIELD_NAMES,
+  PROTOCOL_VERSION,
+  canonicalJson,
   parseClientMessage,
+  parseNetworkManifest,
   parseServerMessage,
+  type ClientToServerMessage,
+  type ManifestServerEntry,
+  type NetworkManifest,
+  type NetworkManifestBody,
+  type ServerCapability,
+  type ServerToClientMessage,
 } from "@ztc/protocol";
 import type { ConnectionState, ServerStats } from "@ztc/shared";
 
@@ -27,12 +33,32 @@ export type PeerHandler = (
 export type RelayHandler = (msg: Extract<ServerToClientMessage, { type: "relay_packet" }>) => void;
 export type ErrorHandler = (msg: Extract<ServerToClientMessage, { type: "error" }>) => void;
 
+export type ServerSelectionKind = "official" | "community" | "custom";
+
+export interface SelectedServer {
+  kind: ServerSelectionKind;
+  wsUrl: string;
+  httpUrl?: string;
+  serverId?: string;
+  displayName: string;
+  /** Expected Ed25519 public key when known from manifest; optional for custom. */
+  expectedPublicKey?: string;
+}
+
+export interface VerifiedServerInfo {
+  serverId: string;
+  displayName: string;
+  publicKey: string;
+  protocolVersion: number;
+  capabilities: ServerCapability[];
+}
+
 export interface ServerInterfaceConfig {
-  /** WebSocket URL, e.g. ws://localhost:8787 */
+  /** Initial WebSocket URL (overridden after server selection). */
   url: string;
-  /** Optional audit hook — every outbound message is passed here for tests. */
+  /** Developer public key for manifest verification (defaults to embedded). */
+  developerPublicKey?: string;
   onOutbound?: (message: ClientToServerMessage) => void;
-  /** Optional audit hook — every inbound message. */
   onInbound?: (message: ServerToClientMessage) => void;
 }
 
@@ -43,18 +69,24 @@ export interface PublishEphemeralKeyArgs {
   singleUse: boolean;
 }
 
+const CLIENT_VERSION = "0.1.0";
+
 /**
  * Auditable network boundary.
  *
- * Intentionally narrow API. No method accepts plaintext messages, contact lists,
- * private keys, or conversation history.
+ * Extends the original signalling API with:
+ * - one-time signed manifest bootstrap (HTTP GET)
+ * - third-party / custom server selection
+ * - hello handshake verifying server identity + capabilities
+ *
+ * Still never accepts plaintext messages, contacts, or private keys.
  */
 export class ServerInterface {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
   private peerId: string | null = null;
   private state: ConnectionState = "disconnected";
-  private readonly config: ServerInterfaceConfig;
+  private config: ServerInterfaceConfig;
   private readonly signallingHandlers = new Set<SignallingHandler>();
   private readonly presenceHandlers = new Set<PresenceHandler>();
   private readonly peerHandlers = new Set<PeerHandler>();
@@ -63,9 +95,19 @@ export class ServerInterface {
   private readonly outboundLog: ClientToServerMessage[] = [];
   private stats: ServerStats | null = null;
   private pending = new Map<string, { resolve: (v: ServerToClientMessage) => void; reject: (e: Error) => void }>();
+  private manifest: NetworkManifest | null = null;
+  private selected: SelectedServer | null = null;
+  private verifiedServer: VerifiedServerInfo | null = null;
+  private readonly developerPublicKey: string;
 
   constructor(config: ServerInterfaceConfig) {
     this.config = config;
+    this.developerPublicKey = config.developerPublicKey ?? EMBEDDED_DEVELOPER_PUBLIC_KEY;
+    this.selected = {
+      kind: "official",
+      wsUrl: config.url,
+      displayName: "Direct URL",
+    };
   }
 
   getConnectionState(): ConnectionState {
@@ -76,7 +118,6 @@ export class ServerInterface {
     return this.sessionId;
   }
 
-  /** Development/test: all outbound messages since connect. */
   getOutboundAuditLog(): readonly ClientToServerMessage[] {
     return this.outboundLog;
   }
@@ -85,13 +126,127 @@ export class ServerInterface {
     return this.stats;
   }
 
+  getManifest(): NetworkManifest | null {
+    return this.manifest;
+  }
+
+  getSelectedServer(): SelectedServer | null {
+    return this.selected;
+  }
+
+  getVerifiedServer(): VerifiedServerInfo | null {
+    return this.verifiedServer;
+  }
+
+  getDeveloperPublicKey(): string {
+    return this.developerPublicKey;
+  }
+
+  /**
+   * One-time (or refresh) bootstrap: fetch signed network manifest over HTTP.
+   * This is the ONLY HTTP call in the client stack, and it lives here intentionally.
+   */
+  async fetchNetworkManifest(bootstrapHttpUrl: string): Promise<NetworkManifest> {
+    const url = bootstrapHttpUrl.replace(/\/$/, "") + "/manifest";
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) {
+      throw new Error(`Manifest fetch failed: HTTP ${res.status}`);
+    }
+    const raw: unknown = await res.json();
+    return this.verifyAndStoreManifest(raw);
+  }
+
+  /** Verify a manifest object (from network or cache) against the embedded developer key. */
+  verifyAndStoreManifest(raw: unknown): NetworkManifest {
+    const parsed = parseNetworkManifest(raw);
+    if (!parsed.ok) {
+      throw new Error(`Invalid manifest: ${parsed.error}`);
+    }
+    const manifest = parsed.value;
+    if (manifest.developerPublicKey !== this.developerPublicKey) {
+      throw new Error("Manifest developerPublicKey does not match embedded key");
+    }
+    if (manifest.expiresAt < Date.now()) {
+      throw new Error("Network manifest has expired");
+    }
+    if (manifest.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(`Unsupported protocol version ${manifest.protocolVersion}`);
+    }
+    const { signature, ...body } = manifest;
+    const message = canonicalJson(body satisfies NetworkManifestBody);
+    if (!verifyMessage(message, signature, this.developerPublicKey)) {
+      throw new Error("Network manifest signature verification failed");
+    }
+    this.manifest = manifest;
+    return manifest;
+  }
+
+  listManifestServers(): ManifestServerEntry[] {
+    return this.manifest?.servers ?? [];
+  }
+
+  selectOfficialServer(): SelectedServer {
+    const entry =
+      this.listManifestServers().find((s) => s.official) ?? this.listManifestServers()[0];
+    if (!entry) {
+      // Fall back to constructor URL when no manifest yet
+      this.selected = {
+        kind: "official",
+        wsUrl: this.config.url,
+        displayName: "Official (default)",
+      };
+      return this.selected;
+    }
+    this.selected = toSelected(entry, "official");
+    this.config = { ...this.config, url: this.selected.wsUrl };
+    return this.selected;
+  }
+
+  selectCommunityServer(serverId: string): SelectedServer {
+    const entry = this.listManifestServers().find((s) => s.serverId === serverId && s.community);
+    if (!entry) throw new Error(`Community server not found: ${serverId}`);
+    this.selected = toSelected(entry, "community");
+    this.config = { ...this.config, url: this.selected.wsUrl };
+    return this.selected;
+  }
+
+  selectManifestServer(serverId: string): SelectedServer {
+    const entry = this.listManifestServers().find((s) => s.serverId === serverId);
+    if (!entry) throw new Error(`Server not in manifest: ${serverId}`);
+    const kind: ServerSelectionKind = entry.official ? "official" : entry.community ? "community" : "community";
+    this.selected = toSelected(entry, kind);
+    this.config = { ...this.config, url: this.selected.wsUrl };
+    return this.selected;
+  }
+
+  /** User-entered self-hosted server. Identity verified at hello if expectedPublicKey given. */
+  setCustomServer(wsUrl: string, opts?: { displayName?: string; expectedPublicKey?: string; httpUrl?: string }): SelectedServer {
+    if (!/^wss?:\/\//.test(wsUrl)) {
+      throw new Error("Custom server must be a ws:// or wss:// URL");
+    }
+    this.selected = {
+      kind: "custom",
+      wsUrl,
+      httpUrl: opts?.httpUrl,
+      displayName: opts?.displayName ?? "Custom server",
+      expectedPublicKey: opts?.expectedPublicKey,
+    };
+    this.config = { ...this.config, url: wsUrl };
+    return this.selected;
+  }
+
   async connect(): Promise<void> {
     if (this.ws && (this.state === "connected" || this.state === "connecting")) {
       return;
     }
+    const url = this.selected?.wsUrl ?? this.config.url;
     this.state = "connecting";
+    this.verifiedServer = null;
     await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.config.url);
+      const ws = new WebSocket(url);
       this.ws = ws;
       ws.onopen = () => {
         this.state = "connected";
@@ -107,6 +262,9 @@ export class ServerInterface {
       };
       ws.onmessage = (ev) => this.handleInbound(ev.data);
     });
+
+    // Handshake: verify server identity + protocol before any session work.
+    await this.performHelloHandshake();
   }
 
   async disconnect(): Promise<void> {
@@ -121,6 +279,7 @@ export class ServerInterface {
     this.ws = null;
     this.state = "disconnected";
     this.sessionId = null;
+    this.verifiedServer = null;
   }
 
   async registerEphemeralSession(peerId: string, ttlMs = 30 * 60 * 1000): Promise<{ sessionId: string; expiresAt: number }> {
@@ -196,7 +355,6 @@ export class ServerInterface {
 
   async publishEphemeralKey(args: PublishEphemeralKeyArgs): Promise<void> {
     this.assertSession();
-    // Hard guard: reject anything that looks like plaintext or private keys
     assertSafeEphemeralMaterial(args.encryptedKeyMaterial);
     await this.send({
       type: "publish_ephemeral_key",
@@ -215,8 +373,6 @@ export class ServerInterface {
       sessionId: this.sessionId!,
       keyId,
     });
-    // Response arrives async via inbound; callers typically wait via Promise racing handlers.
-    // For prototype simplicity we return via a short poll of pending map.
     return new Promise((resolve) => {
       const timeout = setTimeout(() => resolve(null), 3000);
       const key = `ephemeral:${keyId}`;
@@ -292,6 +448,57 @@ export class ServerInterface {
     });
   }
 
+  private async performHelloHandshake(): Promise<void> {
+    await this.send({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: CLIENT_VERSION,
+    });
+
+    const info = await new Promise<Extract<ServerToClientMessage, { type: "server_info" }>>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("server hello timeout")), 5000);
+      this.pending.set("hello", {
+        resolve: (msg) => {
+          clearTimeout(timeout);
+          if (msg.type === "server_info") resolve(msg);
+          else reject(new Error("expected server_info"));
+        },
+        reject: (e) => {
+          clearTimeout(timeout);
+          reject(e);
+        },
+      });
+    });
+
+    const { signature, type: _t, ...unsigned } = info;
+    const message = canonicalJson(unsigned);
+    if (!verifyMessage(message, signature, info.publicKey)) {
+      throw new Error("Server identity signature invalid");
+    }
+    if (info.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(`Server protocol mismatch: ${info.protocolVersion}`);
+    }
+    if (!info.capabilities.includes("signalling")) {
+      throw new Error("Server lacks required signalling capability");
+    }
+
+    const expected = this.selected?.expectedPublicKey;
+    if (expected && expected !== info.publicKey) {
+      throw new Error("Server public key does not match manifest entry");
+    }
+    if (this.selected?.serverId && this.selected.serverId !== info.serverId) {
+      throw new Error("Server id does not match selected server");
+    }
+
+    this.verifiedServer = {
+      serverId: info.serverId,
+      displayName: info.displayName,
+      publicKey: info.publicKey,
+      protocolVersion: info.protocolVersion,
+      capabilities: info.capabilities,
+    };
+  }
+
   private async send(message: ClientToServerMessage): Promise<void> {
     this.assertConnected();
     auditOutbound(message);
@@ -319,6 +526,12 @@ export class ServerInterface {
     this.config.onInbound?.(msg);
 
     switch (msg.type) {
+      case "server_info": {
+        const pending = this.pending.get("hello");
+        pending?.resolve(msg);
+        this.pending.delete("hello");
+        break;
+      }
       case "signalling":
         for (const h of this.signallingHandlers) h(msg);
         break;
@@ -365,6 +578,17 @@ export class ServerInterface {
   }
 }
 
+function toSelected(entry: ManifestServerEntry, kind: ServerSelectionKind): SelectedServer {
+  return {
+    kind,
+    wsUrl: entry.wsUrl,
+    httpUrl: entry.httpUrl,
+    serverId: entry.serverId,
+    displayName: entry.displayName,
+    expectedPublicKey: entry.publicKey,
+  };
+}
+
 function assertSafeEphemeralMaterial(material: string): void {
   const lower = material.toLowerCase();
   for (const bad of ["privatekey", "begin private", "plaintext:"]) {
@@ -374,10 +598,6 @@ function assertSafeEphemeralMaterial(material: string): void {
   }
 }
 
-/**
- * Deep audit: ensure outbound message only contains allowed fields and
- * never contains forbidden field names anywhere in the tree.
- */
 export function auditOutbound(message: ClientToServerMessage): void {
   const type = message.type;
   const allowed = ALLOWED_CLIENT_FIELDS[type];
@@ -394,11 +614,10 @@ export function auditOutbound(message: ClientToServerMessage): void {
 
   const json = JSON.stringify(message);
   for (const forbidden of FORBIDDEN_FIELD_NAMES) {
-    // Check as JSON object keys: "forbidden":
     if (json.includes(`"${forbidden}"`)) {
       throw new Error(`Forbidden field name "${forbidden}" found in outbound ${type}`);
     }
   }
 }
 
-export { FORBIDDEN_FIELD_NAMES, ALLOWED_CLIENT_FIELDS, parseClientMessage };
+export { FORBIDDEN_FIELD_NAMES, ALLOWED_CLIENT_FIELDS, parseClientMessage, EMBEDDED_DEVELOPER_PUBLIC_KEY };

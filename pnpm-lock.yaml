@@ -66,6 +66,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@ztc/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
       '@ztc/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -135,6 +138,9 @@ importers:
 
   packages/server-interface:
     dependencies:
+      '@ztc/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       '@ztc/protocol':
         specifier: workspace:*
         version: link:../protocol

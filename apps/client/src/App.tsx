@@ -1,13 +1,16 @@
 import { useEffect, useEffectEvent, useState, startTransition } from "react";
 import { generateIdentity } from "@ztc/crypto";
-import { ServerInterface } from "@ztc/server-interface";
+import { ServerInterface, type SelectedServer } from "@ztc/server-interface";
+import type { ManifestServerEntry } from "@ztc/protocol";
 import type { SecurityMode, ServerStats } from "@ztc/shared";
 import { P2pManager } from "./lib/p2p";
 import { MessagingService } from "./lib/messaging";
 import { GroupService } from "./lib/groups";
 import * as store from "./lib/store";
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8787";
+const DEFAULT_WS = import.meta.env.VITE_WS_URL ?? "ws://localhost:8787";
+const DEFAULT_BOOTSTRAP =
+  import.meta.env.VITE_BOOTSTRAP_URL ?? "http://127.0.0.1:8787";
 
 interface Runtime {
   identity: store.LocalIdentity;
@@ -30,6 +33,12 @@ export function App() {
   const [groupName, setGroupName] = useState("prototype-group");
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [decryptUntil, setDecryptUntil] = useState("");
+  const [manifestServers, setManifestServers] = useState<ManifestServerEntry[]>([]);
+  const [selectedServer, setSelectedServer] = useState<SelectedServer | null>(null);
+  const [customWs, setCustomWs] = useState("ws://127.0.0.1:8787");
+  const [customKey, setCustomKey] = useState("");
+  const [bootstrapNote, setBootstrapNote] = useState<string>("");
+  const [switching, setSwitching] = useState(false);
 
   const refresh = useEffectEvent(() => {
     startTransition(() => setTick((t) => t + 1));
@@ -52,10 +61,69 @@ export function App() {
           store.saveIdentity(identity);
         }
 
-        const si = new ServerInterface({ url: WS_URL });
+        const savedNet = store.getNetworkConfig();
+        const bootstrapUrl = savedNet?.bootstrapHttpUrl ?? DEFAULT_BOOTSTRAP;
+        const initialWs = savedNet?.selectedWsUrl ?? DEFAULT_WS;
+
+        const si = new ServerInterface({ url: initialWs });
+
+        try {
+          const manifest = await si.fetchNetworkManifest(bootstrapUrl);
+          store.saveNetworkConfig({
+            bootstrapHttpUrl: bootstrapUrl,
+            selectedKind: savedNet?.selectedKind ?? "official",
+            selectedWsUrl: savedNet?.selectedWsUrl ?? initialWs,
+            selectedHttpUrl: savedNet?.selectedHttpUrl ?? bootstrapUrl,
+            selectedServerId: savedNet?.selectedServerId ?? null,
+            selectedDisplayName: savedNet?.selectedDisplayName ?? "Official",
+            selectedPublicKey: savedNet?.selectedPublicKey ?? null,
+            manifestJson: JSON.stringify(manifest),
+            updatedAt: Date.now(),
+          });
+          setBootstrapNote("Signed network manifest verified.");
+        } catch (e) {
+          if (savedNet?.manifestJson) {
+            try {
+              si.verifyAndStoreManifest(JSON.parse(savedNet.manifestJson));
+              setBootstrapNote("Using cached signed manifest (bootstrap unreachable).");
+            } catch {
+              setBootstrapNote(
+                `Bootstrap failed (${e instanceof Error ? e.message : "error"}); using direct URL.`,
+              );
+            }
+          } else {
+            setBootstrapNote(
+              `Bootstrap failed (${e instanceof Error ? e.message : "error"}); using direct URL.`,
+            );
+          }
+        }
+
+        if (!cancelled) setManifestServers(si.listManifestServers());
+
+        if (savedNet?.selectedKind === "custom") {
+          si.setCustomServer(savedNet.selectedWsUrl, {
+            displayName: savedNet.selectedDisplayName,
+            expectedPublicKey: savedNet.selectedPublicKey ?? undefined,
+            httpUrl: savedNet.selectedHttpUrl ?? undefined,
+          });
+        } else if (savedNet?.selectedKind === "community" && savedNet.selectedServerId) {
+          try {
+            si.selectCommunityServer(savedNet.selectedServerId);
+          } catch {
+            si.selectOfficialServer();
+          }
+        } else if (si.listManifestServers().length) {
+          si.selectOfficialServer();
+        }
+
         await si.connect();
         await si.registerEphemeralSession(identity.peerId);
         await si.publishPresence("online");
+
+        const sel = si.getSelectedServer();
+        if (!cancelled) setSelectedServer(sel);
+
+        persistSelection(si, bootstrapUrl);
 
         const p2p = new P2pManager(si, identity.peerId);
         p2p.start();
@@ -96,13 +164,41 @@ export function App() {
     return () => clearInterval(id);
   }, [runtime]);
 
-  if (error) {
+  async function switchServer(apply: (si: ServerInterface) => void): Promise<void> {
+    if (!runtime) return;
+    setSwitching(true);
+    setError(null);
+    try {
+      const { identity, si, p2p, messaging } = runtime;
+      messaging.stop();
+      p2p.stop();
+      await si.disconnect();
+      apply(si);
+      await si.connect();
+      await si.registerEphemeralSession(identity.peerId);
+      await si.publishPresence("online");
+      p2p.start();
+      messaging.start();
+      setSelectedServer(si.getSelectedServer());
+      setManifestServers(si.listManifestServers());
+      persistSelection(si, store.getNetworkConfig()?.bootstrapHttpUrl ?? DEFAULT_BOOTSTRAP);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Server switch failed");
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  if (error && !ready) {
     return (
       <div className="app">
         <div className="brand">
           <h1>ZeroTrustChat</h1>
           <p className="pill danger">{error}</p>
-          <p>Start the signalling server with <span className="mono">pnpm dev</span>.</p>
+          <p>
+            Start the signalling server with <span className="mono">pnpm dev</span>.
+          </p>
         </div>
       </div>
     );
@@ -113,7 +209,7 @@ export function App() {
       <div className="app">
         <div className="brand">
           <h1>ZeroTrustChat</h1>
-          <p>Generating local identity and connecting…</p>
+          <p>Bootstrapping network config and connecting…</p>
         </div>
       </div>
     );
@@ -125,6 +221,7 @@ export function App() {
   const p2pStats = p2p.getAggregateStats();
   const pending = store.countByStatus("pending");
   const expired = store.countByStatus("expired") + store.countByStatus("key_destroyed");
+  const verified = si.getVerifiedServer();
   void tick;
 
   const conversationId = activePeer
@@ -134,6 +231,8 @@ export function App() {
       : null;
   const messages = conversationId ? store.listMessages(conversationId) : [];
   const groupList = store.listGroups();
+  const official = manifestServers.filter((s) => s.official);
+  const community = manifestServers.filter((s) => s.community);
 
   async function addContact() {
     try {
@@ -206,13 +305,77 @@ export function App() {
       <header className="brand">
         <h1>ZeroTrustChat</h1>
         <p>
-          Privacy-first P2P prototype. Messages travel device-to-device. The server is signalling
-          only — never a mailbox.
+          Privacy-first P2P prototype. The app owns the protocol; infrastructure is interchangeable.
+          Messages stay device-to-device.
         </p>
       </header>
 
       <div className="layout">
         <aside className="stack">
+          <section className="panel stack">
+            <h2>Infrastructure</h2>
+            <p className="mono" style={{ color: "var(--muted)", margin: 0 }}>
+              {bootstrapNote}
+            </p>
+            <div>
+              <span className="pill">{selectedServer?.kind ?? "—"}</span>{" "}
+              <span className="pill">{selectedServer?.displayName ?? "—"}</span>
+            </div>
+            {verified && (
+              <div className="mono">
+                verified {verified.serverId.slice(0, 16)}… · caps: {verified.capabilities.join(", ")}
+              </div>
+            )}
+            <div className="stack">
+              <button
+                type="button"
+                className="secondary"
+                disabled={switching || official.length === 0}
+                onClick={() => void switchServer((s) => s.selectOfficialServer())}
+              >
+                Use official server
+              </button>
+              {community.map((c) => (
+                <button
+                  key={`c-${c.displayName}`}
+                  type="button"
+                  className="secondary"
+                  disabled={switching}
+                  onClick={() => void switchServer((s) => s.selectCommunityServer(c.serverId))}
+                >
+                  Community: {c.displayName}
+                </button>
+              ))}
+              <label>
+                Custom / self-hosted WebSocket URL
+                <input value={customWs} onChange={(e) => setCustomWs(e.target.value)} />
+              </label>
+              <label>
+                Optional expected server public key (hex)
+                <input
+                  value={customKey}
+                  onChange={(e) => setCustomKey(e.target.value)}
+                  placeholder="leave blank to trust URL only"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={switching}
+                onClick={() =>
+                  void switchServer((s) =>
+                    s.setCustomServer(customWs.trim(), {
+                      expectedPublicKey: customKey.trim() || undefined,
+                      displayName: "Custom / self-hosted",
+                    }),
+                  )
+                }
+              >
+                Connect custom server
+              </button>
+            </div>
+            {error && <p className="pill danger">{error}</p>}
+          </section>
+
           <section className="panel stack">
             <h2>Identity</h2>
             <div>
@@ -375,12 +538,12 @@ export function App() {
               {activePeer && (
                 <span className="pill">{contacts.find((c) => c.peerId === activePeer)?.displayName}</span>
               )}
-              {activeGroup && (
-                <span className="pill">{store.getGroup(activeGroup)?.name}</span>
-              )}
+              {activeGroup && <span className="pill">{store.getGroup(activeGroup)?.name}</span>}
             </h2>
 
-            {!activePeer && !activeGroup && <p style={{ color: "var(--muted)" }}>Select a contact or group.</p>}
+            {!activePeer && !activeGroup && (
+              <p style={{ color: "var(--muted)" }}>Select a contact or group.</p>
+            )}
 
             <div className="messages">
               {messages.map((m) => (
@@ -390,7 +553,9 @@ export function App() {
                 >
                   <div className="meta">
                     {m.senderId.slice(0, 10)}… · {m.status} · {m.securityMode}
-                    {m.decryptionDeadline ? ` · decrypt≠after ${new Date(m.decryptionDeadline).toLocaleTimeString()}` : ""}
+                    {m.decryptionDeadline
+                      ? ` · decrypt≠after ${new Date(m.decryptionDeadline).toLocaleTimeString()}`
+                      : ""}
                   </div>
                   <div>
                     {m.plaintextCache ?? (
@@ -480,4 +645,24 @@ export function App() {
       </div>
     </div>
   );
+}
+
+function persistSelection(si: ServerInterface, bootstrapHttpUrl: string): void {
+  const sel = si.getSelectedServer();
+  const verified = si.getVerifiedServer();
+  const manifest = si.getManifest();
+  if (!sel) return;
+  store.saveNetworkConfig({
+    bootstrapHttpUrl,
+    selectedKind: sel.kind,
+    selectedWsUrl: sel.wsUrl,
+    selectedHttpUrl: sel.httpUrl ?? null,
+    selectedServerId: sel.serverId ?? verified?.serverId ?? null,
+    selectedDisplayName: sel.displayName,
+    selectedPublicKey: sel.expectedPublicKey ?? verified?.publicKey ?? null,
+    manifestJson: manifest
+      ? JSON.stringify(manifest)
+      : (store.getNetworkConfig()?.manifestJson ?? null),
+    updatedAt: Date.now(),
+  });
 }

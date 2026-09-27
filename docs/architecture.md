@@ -14,9 +14,14 @@ flowchart LR
     A[Alice client]
     B[Bob client]
   end
-  S[Signalling server]
-  A -->|server-interface only| S
-  B -->|server-interface only| S
+  M[Signed network manifest]
+  S1[Official server]
+  S2[Community / self-hosted]
+  A -->|bootstrap once| M
+  M --> S1
+  M --> S2
+  A -->|server-interface only| S1
+  B -->|server-interface only| S2
   A <-->|WebRTC DataChannel + app encryption| B
 ```
 

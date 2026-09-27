@@ -12,6 +12,7 @@
     "clean": "rm -rf dist data"
   },
   "dependencies": {
+    "@ztc/crypto": "workspace:*",
     "@ztc/protocol": "workspace:*",
     "@ztc/shared": "workspace:*",
     "better-sqlite3": "^11.10.0",

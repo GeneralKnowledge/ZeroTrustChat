@@ -10,6 +10,7 @@ rest of the application remains closed source.
 
 | Operation | Fields | Purpose |
 |-----------|--------|---------|
+| `hello` | `protocolVersion`, `clientVersion` | Protocol / server identity handshake |
 | `register_session` | `sessionId`, `peerId`, `expiresAt` | Ephemeral signalling session |
 | `close_session` | `sessionId` | End session |
 | `request_peer` | `sessionId`, `targetPeerId` | Ask if peer is online |
@@ -47,9 +48,12 @@ These are rejected by:
 
 | Transport | Default (dev) | Purpose |
 |-----------|---------------|---------|
-| WebSocket | `ws://localhost:8787` | All protocol messages |
+| WebSocket | `ws://localhost:8787` | Protocol messages (hello, signalling, …) |
+| HTTP GET | `http://localhost:8787/manifest` | One-time signed network bootstrap |
 
 There is **no** REST API for messages. There is **no** HTTP upload endpoint.
+
+Bootstrap HTTP is allowed **only** inside this package (`fetchNetworkManifest`).
 
 ## Retention expectations
 

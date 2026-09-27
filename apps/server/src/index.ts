@@ -22,10 +22,17 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  PROTOCOL_VERSION,
   parseClientMessage,
   type ClientToServerMessage,
   type ServerToClientMessage,
 } from "@ztc/protocol";
+import {
+  PROTOTYPE_OFFICIAL_SERVER_PRIVATE,
+  PROTOTYPE_OFFICIAL_SERVER_PUBLIC,
+  ServerIdentity,
+} from "./identity.js";
+import { buildOfficialManifest } from "./manifest.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -62,6 +69,8 @@ export class SignallingServer {
   private wss: WebSocketServer | null = null;
   private db!: Database.Database;
   private dbPath: string = DB_PATH;
+  private listenPort = PORT;
+  private identity!: ServerIdentity;
   private sockets = new Map<string, WebSocket>(); // sessionId -> ws
   private peerToSession = new Map<string, string>(); // peerId -> sessionId
   private sessionToPeer = new Map<string, string>();
@@ -76,7 +85,14 @@ export class SignallingServer {
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   start(port = PORT, dbPath = process.env.ZTC_DB_PATH ?? DB_PATH): void {
+    this.listenPort = port;
     this.dbPath = dbPath;
+    this.identity = new ServerIdentity({
+      displayName: process.env.ZTC_SERVER_NAME ?? "Official (local prototype)",
+      privateKeyHex: PROTOTYPE_OFFICIAL_SERVER_PRIVATE,
+      publicKeyHex: PROTOTYPE_OFFICIAL_SERVER_PUBLIC,
+    });
+
     mkdirSync(dirname(this.dbPath), { recursive: true });
     this.db = new Database(this.dbPath);
     this.db.exec(`
@@ -101,10 +117,34 @@ export class SignallingServer {
     log("info", "dev sessions cleared on boot (production would be RAM-only)");
 
     this.httpServer = createServer((req, res) => {
-      if (req.url === "/health") {
+      const path = req.url?.split("?")[0] ?? "";
+      if (path === "/health") {
         const stats = this.getStats();
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true, ...stats }));
+        res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ...stats,
+            serverId: this.identity.serverId,
+            displayName: this.identity.displayName,
+            capabilities: this.identity.capabilities,
+            protocolVersion: PROTOCOL_VERSION,
+          }),
+        );
+        return;
+      }
+      if (path === "/manifest") {
+        const manifest = buildOfficialManifest({
+          port: this.listenPort,
+          includeCommunityAlias: true,
+        });
+        res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
+        res.end(JSON.stringify(manifest));
+        return;
+      }
+      if (path === "/server-info") {
+        res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
+        res.end(JSON.stringify(this.identity.buildServerInfo()));
         return;
       }
       res.writeHead(404);
@@ -116,7 +156,12 @@ export class SignallingServer {
     this.cleanupTimer = setInterval(() => this.expireState(), 5_000);
 
     this.httpServer.listen(port, () => {
-      log("info", `signalling server listening`, { port, logLevel: LOG_LEVEL, db: this.dbPath });
+      log("info", `signalling server listening`, {
+        port,
+        logLevel: LOG_LEVEL,
+        db: this.dbPath,
+        serverIdPrefix: this.identity.serverId.slice(0, 12),
+      });
     });
   }
 
@@ -226,6 +271,18 @@ export class SignallingServer {
     boundSession: string | null,
   ): string | null {
     switch (msg.type) {
+      case "hello": {
+        if (msg.protocolVersion !== PROTOCOL_VERSION) {
+          this.send(ws, {
+            type: "error",
+            code: "protocol_mismatch",
+            message: `Server requires protocol ${PROTOCOL_VERSION}`,
+          });
+          return boundSession;
+        }
+        this.send(ws, this.identity.buildServerInfo());
+        return boundSession;
+      }
       case "register_session": {
         this.db
           .prepare(

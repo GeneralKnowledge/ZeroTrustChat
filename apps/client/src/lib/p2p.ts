@@ -138,13 +138,6 @@ export class P2pManager {
     } finally {
       this.makingOffer.delete(remotePeerId);
     }
-
-    // Retry once if the peer was not yet ready to answer.
-    setTimeout(() => {
-      if (this.channels.get(remotePeerId)?.readyState !== "open" && this.localPeerId < remotePeerId) {
-        void this.createAndSendOffer(remotePeerId).catch(() => undefined);
-      }
-    }, 1500);
   }
 
   send(remotePeerId: string, envelope: P2pEnvelope): boolean {
@@ -217,6 +210,16 @@ export class P2pManager {
     const pc = this.getOrCreatePc(fromPeerId);
 
     if (payload.kind === "offer" && payload.sdp) {
+      // Glare: if we already made an offer and we are the impolite peer, ignore remote offer.
+      const offering = this.makingOffer.has(fromPeerId) || pc.signalingState === "have-local-offer";
+      if (offering && this.localPeerId > fromPeerId) {
+        return;
+      }
+      if (offering && this.localPeerId < fromPeerId) {
+        // We are polite: roll back our offer and accept theirs.
+        await pc.setLocalDescription({ type: "rollback" });
+      }
+
       this.setState(fromPeerId, "connecting");
       await pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
       const answer = await pc.createAnswer();
@@ -226,6 +229,9 @@ export class P2pManager {
         sdp: answer.sdp ?? "",
       });
     } else if (payload.kind === "answer" && payload.sdp) {
+      if (pc.signalingState !== "have-local-offer") {
+        return;
+      }
       await pc.setRemoteDescription({ type: "answer", sdp: payload.sdp });
     } else if (payload.kind === "ice_candidate" && payload.candidate) {
       try {

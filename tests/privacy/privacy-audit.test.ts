@@ -104,6 +104,7 @@ describe("privacy audit suite", () => {
       [
         "close_session",
         "get_stats",
+        "hello",
         "presence",
         "publish_ephemeral_key",
         "register_session",

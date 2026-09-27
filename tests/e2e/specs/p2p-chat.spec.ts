@@ -2,6 +2,7 @@ import { test, expect, type Page, type BrowserContext } from "@playwright/test";
 
 async function readInvite(page: Page): Promise<string> {
   await expect(page.getByRole("heading", { name: "ZeroTrustChat" })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Copy invite" })).toBeVisible({ timeout: 60_000 });
   const area = page.locator("textarea").first();
   await expect(area).not.toHaveValue("");
   return area.inputValue();
@@ -26,13 +27,13 @@ test.describe("P2P messaging privacy", () => {
     const aliceInvite = await readInvite(alice);
     const bobInvite = await readInvite(bob);
 
+    // Stagger so the smaller peerId can complete offer before the other side dials.
     await addPeer(alice, bobInvite);
+    await bob.waitForTimeout(800);
     await addPeer(bob, aliceInvite);
 
-    // Wait for aggregate P2P state
-    await expect(
-      alice.locator(".stat").filter({ has: alice.locator(".k", { hasText: /^P2P$/ }) }).locator(".v"),
-    ).toHaveText(/connected/, { timeout: 90_000 });
+    await expect(alice.getByText("P2P: connected")).toBeVisible({ timeout: 90_000 });
+    await expect(bob.getByText("P2P: connected")).toBeVisible({ timeout: 90_000 });
 
     const secret = `p2p-secret-${Date.now()}`;
     await alice.locator("textarea").last().fill(secret);

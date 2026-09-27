@@ -15,6 +15,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@ztc/crypto": "workspace:*",
     "@ztc/protocol": "workspace:*",
     "@ztc/shared": "workspace:*"
   },
