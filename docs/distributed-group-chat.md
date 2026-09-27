@@ -1,10 +1,21 @@
 # Distributed group chat (design)
 
-Design proposal for large groups (≈50–500+ members) without full-mesh P2P or central message distribution.
+Design for large groups (≈50–500+ members) without full-mesh P2P or central message distribution.
 
-**Status:** design only. The running prototype still uses full fan-out (see [Current prototype](#current-prototype-what-breaks-at-scale)). Protocol implementation is deferred until explicitly requested.
+**Status:** shared **connection pooling** and **compressed digests** are implemented in the client (`groupTopology.ts`, `groupDigest.ts`, `GroupService`). Soft temporary helpers, signed epoch key-wrap, and MLS remain design-only.
 
-**Core principle:** do not optimise for instant synchronisation. A group should normally converge within ~2–3 minutes. That delay is an intentional trade-off for lower server load, bandwidth, battery use, attack surface, and dependence on central infrastructure.
+**Core principle:** do not optimise for instant synchronisation. A group should normally converge within ~2–3 minutes under churn, but propagation is eager on live edges (fanout + immediate forward + ~8s anti-entropy) — delay is not artificial.
+
+## Implementation (current)
+
+| Piece | Behaviour |
+|-------|-----------|
+| Shared pool | Device-wide max ~8 DataChannels; peers ranked by shared groups + liveness (`ensureTopology`) |
+| Send path | Encrypt once → fanout ≤3 connected members (not N−1) |
+| Gossip | On receive, forward to other live neighbors (deduped by `messageId`) |
+| Digests | Per-sender `(maxSeq, gaps[])` every ~8s + on connect; `want` / `have` repair |
+| Sync UI | `Synchronising… local/estimate` from neighbor `messageCount` ads |
+| Server | Still signalling only — group ciphertext never uploaded |
 
 ## Current prototype (what breaks at scale)
 

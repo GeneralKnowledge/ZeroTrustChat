@@ -134,6 +134,7 @@ export function App() {
         messaging.start();
 
         const groups = new GroupService(p2p, identity);
+        groups.start();
         groups.onChange(() => refresh());
 
         if (!cancelled) {
@@ -282,7 +283,8 @@ export function App() {
     const members = contacts.map((c) => c.peerId);
     if (members.length === 0) return;
     const id = groups.createGroup(groupName || "group", members);
-    for (const m of members) void p2p.connectToPeer(m);
+    // Shared pool — do not dial every member (degree-capped gossip topology).
+    void groups.ensureTopology().then(() => refresh());
     setActiveGroup(id);
     setActivePeer(null);
     refresh();
@@ -441,6 +443,7 @@ export function App() {
                   onClick={() => {
                     setActiveGroup(g.groupId);
                     setActivePeer(null);
+                    void groups.ensureTopology().then(() => refresh());
                     refresh();
                   }}
                 >
@@ -469,6 +472,10 @@ export function App() {
                 <div className="v">
                   {p2pStats.messagesSent} / {p2pStats.messagesReceived}
                 </div>
+              </div>
+              <div className="stat">
+                <div className="k">P2P pool</div>
+                <div className="v">{p2p.listConnectedPeers().length} live</div>
               </div>
               <div className="stat">
                 <div className="k">Pending / expired</div>
@@ -540,6 +547,27 @@ export function App() {
               )}
               {activeGroup && <span className="pill">{store.getGroup(activeGroup)?.name}</span>}
             </h2>
+
+            {activeGroup &&
+              (() => {
+                const sync = groups.getSyncStatus(activeGroup);
+                if (!sync.syncing && sync.connectedMembers === 0 && sync.local === 0) {
+                  return (
+                    <p className="mono" style={{ color: "var(--muted)", marginTop: 0 }}>
+                      Group pool: {sync.poolSize} live edges · {sync.connectedMembers} members connected
+                    </p>
+                  );
+                }
+                return (
+                  <p className="mono" style={{ color: "var(--muted)", marginTop: 0 }}>
+                    {sync.syncing
+                      ? `Synchronising… ${sync.local}/${sync.estimate}`
+                      : `In sync · ${sync.local} messages`}
+                    {" · "}
+                    {sync.connectedMembers} members connected · pool {sync.poolSize}
+                  </p>
+                );
+              })()}
 
             {!activePeer && !activeGroup && (
               <p style={{ color: "var(--muted)" }}>Select a contact or group.</p>
