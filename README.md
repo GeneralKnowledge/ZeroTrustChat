@@ -66,13 +66,14 @@ pnpm test:e2e       # Playwright (server must be available or harness starts it)
 - [Privacy model](docs/privacy-model.md)
 - [Threat model](docs/threat-model.md)
 - [Distributed group chat (design)](docs/distributed-group-chat.md)
+- [Media and attachments](docs/media-and-attachments.md) (deferred — why external hosts don’t fit)
 - [Development vs production](docs/development-vs-production.md)
 - [Third-party servers](docs/third-party-servers.md)
 - [Server interface README](packages/server-interface/README.md)
 
 ## Intentionally not built
 
-iOS/Android apps, push, TURN production infra, phone discovery, email accounts, analytics, cloud mailboxes, voice/video.
+iOS/Android apps, push, TURN production infra, phone discovery, email accounts, analytics, cloud mailboxes, voice/video, **media attachments** (see [media and attachments](docs/media-and-attachments.md)).
 
 ## Crypto primitives
 
