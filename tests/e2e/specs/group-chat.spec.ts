@@ -9,8 +9,7 @@ async function readInvite(page: Page): Promise<string> {
 }
 
 async function addPeer(page: Page, invite: string): Promise<void> {
-  const areas = page.locator("textarea");
-  await areas.nth(1).fill(invite);
+  await page.getByLabel("Paste invitation code").fill(invite);
   await page.getByRole("button", { name: "Add & connect" }).click();
 }
 
@@ -68,7 +67,7 @@ test.describe("Group chat P2P", () => {
     await carol.getByRole("button", { name: /e2e-trio/ }).click();
 
     const secret = `group-secret-${Date.now()}`;
-    await alice.locator("textarea").last().fill(secret);
+    await alice.getByLabel("Message").fill(secret);
     await alice.getByRole("button", { name: "Send over P2P" }).click();
 
     await expect(bob.getByText(secret)).toBeVisible({ timeout: 60_000 });

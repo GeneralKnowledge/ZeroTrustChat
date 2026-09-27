@@ -36,11 +36,15 @@ export interface PeerConnectionStats {
 type DataHandler = (fromPeerId: string, envelope: P2pEnvelope) => void;
 type StateHandler = (peerId: string, state: P2pState) => void;
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-];
+type IceCandidateInit = {
+  candidate: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+};
 
-// Prefer including host candidates for local prototype / same-machine e2e.
+const ICE_SERVERS: RTCIceServer[] = [];
+// Local/prototype: host candidates only. Empty iceServers makes gathering complete
+// immediately and avoids STUN timeouts that stall same-machine e2e.
 
 export class P2pManager implements P2pTransport {
   private readonly si: ServerInterface;
@@ -50,9 +54,11 @@ export class P2pManager implements P2pTransport {
   private readonly states = new Map<string, P2pState>();
   private readonly sent = new Map<string, number>();
   private readonly received = new Map<string, number>();
+  private readonly pendingRemoteIce = new Map<string, IceCandidateInit[]>();
   private dataHandlers = new Set<DataHandler>();
   private stateHandlers = new Set<StateHandler>();
   private unsubSignalling: (() => void) | null = null;
+  private unsubPeer: (() => void) | null = null;
   private makingOffer = new Set<string>();
 
   constructor(si: ServerInterface, localPeerId: string) {
@@ -68,13 +74,25 @@ export class P2pManager implements P2pTransport {
         console.error("signalling error", err);
       }
     });
+    this.unsubPeer = this.si.onPeer((msg) => {
+      if (msg.type !== "peer_available") return;
+      // Peer came online while we were waiting — retry offer if we are the polite dialer.
+      if (this.localPeerId > msg.peerId) return;
+      if (this.channels.get(msg.peerId)?.readyState === "open") return;
+      if (this.states.get(msg.peerId) === "connected") return;
+      this.resetPeerIfNeeded(msg.peerId);
+      this.setState(msg.peerId, "connecting");
+      void this.createAndSendOffer(msg.peerId);
+    });
   }
 
   stop(): void {
     this.unsubSignalling?.();
+    this.unsubPeer?.();
     for (const pc of this.pcs.values()) pc.close();
     this.pcs.clear();
     this.channels.clear();
+    this.pendingRemoteIce.clear();
   }
 
   onData(handler: DataHandler): () => void {
@@ -116,6 +134,7 @@ export class P2pManager implements P2pTransport {
 
   async connectToPeer(remotePeerId: string): Promise<void> {
     await this.si.requestPeer(remotePeerId);
+    this.resetPeerIfNeeded(remotePeerId);
     this.getOrCreatePc(remotePeerId);
     if (this.channels.get(remotePeerId)?.readyState === "open") {
       return;
@@ -128,6 +147,28 @@ export class P2pManager implements P2pTransport {
     }
 
     await this.createAndSendOffer(remotePeerId);
+  }
+
+  /** Drop dead peer state so a later dial can create a fresh RTCPeerConnection. */
+  private resetPeerIfNeeded(remotePeerId: string): void {
+    const ch = this.channels.get(remotePeerId);
+    const pc = this.pcs.get(remotePeerId);
+    const channelDead = !ch || ch.readyState === "closed" || ch.readyState === "closing";
+    const pcDead =
+      !pc ||
+      pc.connectionState === "failed" ||
+      pc.connectionState === "closed" ||
+      pc.connectionState === "disconnected";
+    if (!channelDead && !pcDead) return;
+    try {
+      pc?.close();
+    } catch {
+      // ignore
+    }
+    this.pcs.delete(remotePeerId);
+    this.channels.delete(remotePeerId);
+    this.pendingRemoteIce.delete(remotePeerId);
+    this.makingOffer.delete(remotePeerId);
   }
 
   private async createAndSendOffer(remotePeerId: string): Promise<void> {
@@ -144,9 +185,11 @@ export class P2pManager implements P2pTransport {
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      // Bundle host candidates into SDP so connection works even if trickle is delayed.
+      await this.waitForIceGathering(pc);
       await this.si.sendSignallingMessage(remotePeerId, {
         kind: "offer",
-        sdp: offer.sdp ?? "",
+        sdp: pc.localDescription?.sdp ?? offer.sdp ?? "",
       });
     } finally {
       this.makingOffer.delete(remotePeerId);
@@ -155,8 +198,21 @@ export class P2pManager implements P2pTransport {
 
   send(remotePeerId: string, envelope: P2pEnvelope): boolean {
     const ch = this.channels.get(remotePeerId);
+    const pc = this.pcs.get(remotePeerId);
     if (!ch || ch.readyState !== "open") return false;
-    ch.send(JSON.stringify(envelope));
+    if (
+      pc &&
+      pc.connectionState !== "connected" &&
+      pc.iceConnectionState !== "connected" &&
+      pc.iceConnectionState !== "completed"
+    ) {
+      return false;
+    }
+    try {
+      ch.send(JSON.stringify(envelope));
+    } catch {
+      return false;
+    }
     this.sent.set(remotePeerId, (this.sent.get(remotePeerId) ?? 0) + 1);
     return true;
   }
@@ -212,9 +268,19 @@ export class P2pManager implements P2pTransport {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc!.connectionState === "failed") this.setState(remotePeerId, "failed");
-      if (pc!.connectionState === "disconnected" || pc!.connectionState === "closed") {
-        this.setState(remotePeerId, "disconnected");
+      const state = pc!.connectionState;
+      if (state === "failed") this.setState(remotePeerId, "failed");
+      if (state === "disconnected" || state === "closed" || state === "failed") {
+        const ch = this.channels.get(remotePeerId);
+        try {
+          ch?.close();
+        } catch {
+          // ignore
+        }
+        this.channels.delete(remotePeerId);
+        if (state === "disconnected" || state === "closed") {
+          this.setState(remotePeerId, "disconnected");
+        }
       }
     };
 
@@ -246,9 +312,49 @@ export class P2pManager implements P2pTransport {
     for (const h of this.stateHandlers) h(peerId, state);
   }
 
+  /** Prefer bundled SDP; don't block forever if STUN is unreachable. */
+  private async waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 1500): Promise<void> {
+    if (pc.iceGatheringState === "complete") return;
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        const onChange = () => {
+          if (pc.iceGatheringState === "complete") {
+            pc.removeEventListener("icegatheringstatechange", onChange);
+            resolve();
+          }
+        };
+        pc.addEventListener("icegatheringstatechange", onChange);
+      }),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  }
+
+  private async flushPendingIce(peerId: string, pc: RTCPeerConnection): Promise<void> {
+    const pending = this.pendingRemoteIce.get(peerId);
+    if (!pending?.length) return;
+    this.pendingRemoteIce.delete(peerId);
+    for (const c of pending) {
+      try {
+        await pc.addIceCandidate({
+          candidate: c.candidate,
+          sdpMid: c.sdpMid ?? undefined,
+          sdpMLineIndex: c.sdpMLineIndex ?? undefined,
+        });
+      } catch {
+        // ignore stale
+      }
+    }
+  }
+
   private async handleSignalling(
     fromPeerId: string,
-    payload: { kind: string; sdp?: string; candidate?: string; sdpMid?: string | null; sdpMLineIndex?: number | null },
+    payload: {
+      kind: string;
+      sdp?: string;
+      candidate?: string;
+      sdpMid?: string | null;
+      sdpMLineIndex?: number | null;
+    },
   ): Promise<void> {
     const pc = this.getOrCreatePc(fromPeerId);
 
@@ -265,23 +371,37 @@ export class P2pManager implements P2pTransport {
 
       this.setState(fromPeerId, "connecting");
       await pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
+      await this.flushPendingIce(fromPeerId, pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      await this.waitForIceGathering(pc);
       await this.si.sendSignallingMessage(fromPeerId, {
         kind: "answer",
-        sdp: answer.sdp ?? "",
+        sdp: pc.localDescription?.sdp ?? answer.sdp ?? "",
       });
     } else if (payload.kind === "answer" && payload.sdp) {
       if (pc.signalingState !== "have-local-offer") {
         return;
       }
       await pc.setRemoteDescription({ type: "answer", sdp: payload.sdp });
+      await this.flushPendingIce(fromPeerId, pc);
     } else if (payload.kind === "ice_candidate" && payload.candidate) {
+      const init: IceCandidateInit = {
+        candidate: payload.candidate,
+        sdpMid: payload.sdpMid,
+        sdpMLineIndex: payload.sdpMLineIndex,
+      };
+      if (!pc.remoteDescription) {
+        const q = this.pendingRemoteIce.get(fromPeerId) ?? [];
+        q.push(init);
+        this.pendingRemoteIce.set(fromPeerId, q);
+        return;
+      }
       try {
         await pc.addIceCandidate({
-          candidate: payload.candidate,
-          sdpMid: payload.sdpMid ?? undefined,
-          sdpMLineIndex: payload.sdpMLineIndex ?? undefined,
+          candidate: init.candidate,
+          sdpMid: init.sdpMid ?? undefined,
+          sdpMLineIndex: init.sdpMLineIndex ?? undefined,
         });
       } catch {
         // ignore late candidates

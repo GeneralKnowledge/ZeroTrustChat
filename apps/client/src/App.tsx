@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useState, startTransition } from "react";
+import { useEffect, useEffectEvent, useRef, useState, startTransition } from "react";
 import {
   ensureSigningKeys,
   generateIdentity,
@@ -28,6 +28,7 @@ interface Runtime {
 
 export function App() {
   const [ready, setReady] = useState(false);
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -144,6 +145,10 @@ export function App() {
         }
 
         await si.connect();
+        if (cancelled) {
+          await si.disconnect();
+          return;
+        }
         await si.registerEphemeralSession(identity.peerId);
         await si.publishPresence("online");
 
@@ -153,27 +158,39 @@ export function App() {
         persistSelection(si, bootstrapUrl);
 
         const p2p = new P2pManager(si, identity.peerId);
+        const messaging = new MessagingService(p2p, identity);
+        const groups = new GroupService(p2p, identity);
+
+        const teardown = () => {
+          messaging.stop();
+          groups.stop();
+          p2p.stop();
+          void si.disconnect();
+        };
+
+        if (cancelled) {
+          teardown();
+          return;
+        }
+
         p2p.start();
         p2p.onState(() => refresh());
         p2p.onData(() => refresh());
-
-        const messaging = new MessagingService(p2p, identity);
         messaging.start();
-
-        const groups = new GroupService(p2p, identity);
         groups.start();
         groups.onChange(() => refresh());
 
-        if (!cancelled) {
-          setRuntime({ identity, si, p2p, messaging, groups });
-          setReady(true);
-        }
+        cleanupRef.current = teardown;
+        setRuntime({ identity, si, p2p, messaging, groups });
+        setReady(true);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to start");
       }
     })();
     return () => {
       cancelled = true;
+      cleanupRef.current?.();
+      cleanupRef.current = null;
     };
   }, []);
 
@@ -262,6 +279,15 @@ export function App() {
   const official = manifestServers.filter((s) => s.official);
   const community = manifestServers.filter((s) => s.community);
 
+  async function waitConnected(peerId: string, timeoutMs = 30_000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (p2p.isConnected(peerId)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return p2p.isConnected(peerId);
+  }
+
   async function addContact() {
     try {
       const decoded = store.decodeInvitation(inviteInput.trim());
@@ -274,6 +300,8 @@ export function App() {
       setInviteInput("");
       setActivePeer(decoded.peerId);
       await p2p.connectToPeer(decoded.peerId);
+      await waitConnected(decoded.peerId);
+      await messaging.flushOutbox(decoded.peerId);
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Invalid invite");
@@ -286,6 +314,8 @@ export function App() {
     setReplyToId(null);
     setEditingId(null);
     await p2p.connectToPeer(peerId);
+    await waitConnected(peerId);
+    await messaging.flushOutbox(peerId);
     refresh();
   }
 

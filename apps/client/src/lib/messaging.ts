@@ -389,6 +389,15 @@ export class MessagingService {
     }
   }
 
+  /** Flush queued ciphertext for a peer (or all peers). Safe to call after reconnect. */
+  async flushOutbox(peerId?: string): Promise<void> {
+    if (peerId) {
+      await this.flushOutboxFor(peerId);
+      return;
+    }
+    await this.flushAllOutbox();
+  }
+
   private async flushOutboxFor(peerId: string): Promise<void> {
     if (!this.p2p.isConnected(peerId)) return;
     const items = this.store.listOutbox().filter((i) => i.recipientPeerId === peerId);
