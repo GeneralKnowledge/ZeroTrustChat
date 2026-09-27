@@ -1,0 +1,22 @@
+{
+  "name": "@ztc/privacy-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run && tsx ../e2e/privacy-boundary-scan.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "echo ok"
+  },
+  "dependencies": {
+    "@ztc/protocol": "workspace:*",
+    "@ztc/server-interface": "workspace:*",
+    "@ztc/test-utils": "workspace:*",
+    "@ztc/crypto": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
