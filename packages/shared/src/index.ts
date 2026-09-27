@@ -92,6 +92,17 @@ export interface ServerStats {
   contactListsReceived: number;
   privateKeysReceived: number;
   signallingMessagesRelayed: number;
+  introNameplatesActive?: number;
+  introFramesRelayed?: number;
+}
+
+/** Client-side tally of outbound signalling contacts (WebSocket sends). */
+export interface ServerContactStats {
+  /** Total messages sent to the signalling server this connection. */
+  total: number;
+  /** Excludes get_stats (dev-only polling). */
+  essential: number;
+  byType: Record<string, number>;
 }
 
 export function assertNever(x: never): never {

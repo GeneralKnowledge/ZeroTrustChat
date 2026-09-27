@@ -20,12 +20,13 @@ Open **two browser windows** (or profiles), copy each invitation code into the o
 
 ## Demo script
 
-1. Start Alice and Bob clients; exchange invitations.
+1. Start Alice and Bob clients; exchange invitations **or** use **Create short code** / **Join short code** (CPace).
 2. Establish P2P (dashboard shows P2P connected).
 3. Send messages — confirm **Server messages stored: 0** and **Server plaintext recv: 0**.
-4. Disconnect signalling — P2P chat continues.
-5. Stop/restart the server — local history remains; no message DB on server.
-6. Send while peer offline — message stays in local pending queue (not uploaded).
+4. Check **Server contacts (essential)** stays low (intro is a handful of WS messages; hide stats to stop `get_stats` polling).
+5. Disconnect signalling — P2P chat continues.
+6. Stop/restart the server — local history remains; no message DB on server.
+7. Send while peer offline — message stays in local pending queue (not uploaded).
 
 ## Workspace
 

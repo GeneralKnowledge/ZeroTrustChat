@@ -11,6 +11,7 @@ import type { SecurityMode, ServerStats } from "@ztc/shared";
 import { P2pManager } from "./lib/p2p";
 import { MessagingService } from "./lib/messaging";
 import { GroupService } from "./lib/groups";
+import { IntroService } from "./lib/intro";
 import * as store from "./lib/store";
 import { displayBody, isHiddenControlMessage, parseAppMessage } from "./lib/appMessage";
 
@@ -33,6 +34,9 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [inviteInput, setInviteInput] = useState("");
+  const [shortCodeInput, setShortCodeInput] = useState("");
+  const [hostedShortCode, setHostedShortCode] = useState<string | null>(null);
+  const [introBusy, setIntroBusy] = useState(false);
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<SecurityMode>("normal");
@@ -295,6 +299,7 @@ export function App() {
   const pending = store.countByStatus("pending");
   const expired = store.countByStatus("expired") + store.countByStatus("key_destroyed");
   const outboxPending = store.listOutbox().length;
+  const contactStats = si.getServerContactStats();
   const verified = si.getVerifiedServer();
   void tick;
 
@@ -334,6 +339,67 @@ export function App() {
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Invalid invite");
+    }
+  }
+
+  async function hostShortCodeIntro() {
+    if (!runtime) return;
+    setIntroBusy(true);
+    setError(null);
+    setHostedShortCode(null);
+    try {
+      si.resetServerContactStats();
+      const intro = new IntroService(si, identity);
+      const { code, peer } = await intro.host({
+        onCode: (c) => setHostedShortCode(c),
+      });
+      setHostedShortCode(code);
+      store.upsertContact({
+        peerId: peer.peerId,
+        publicKey: peer.publicKey,
+        displayName: peer.displayName,
+        invitationCode: peer.invitationCode,
+        addedAt: Date.now(),
+        signingPublicKey: peer.signingPublicKey,
+      });
+      setActivePeer(peer.peerId);
+      await p2p.connectToPeer(peer.peerId);
+      await waitConnected(peer.peerId);
+      await messaging.flushOutbox(peer.peerId);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Short-code intro failed");
+    } finally {
+      setIntroBusy(false);
+    }
+  }
+
+  async function joinShortCodeIntro() {
+    if (!runtime) return;
+    setIntroBusy(true);
+    setError(null);
+    try {
+      si.resetServerContactStats();
+      const intro = new IntroService(si, identity);
+      const peer = await intro.join(shortCodeInput);
+      setShortCodeInput("");
+      store.upsertContact({
+        peerId: peer.peerId,
+        publicKey: peer.publicKey,
+        displayName: peer.displayName,
+        invitationCode: peer.invitationCode,
+        addedAt: Date.now(),
+        signingPublicKey: peer.signingPublicKey,
+      });
+      setActivePeer(peer.peerId);
+      await p2p.connectToPeer(peer.peerId);
+      await waitConnected(peer.peerId);
+      await messaging.flushOutbox(peer.peerId);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Short-code join failed");
+    } finally {
+      setIntroBusy(false);
     }
   }
 
@@ -658,6 +724,39 @@ export function App() {
 
           <section className="panel stack">
             <h2>Add contact</h2>
+            <h3 style={{ marginBottom: 0 }}>Short code (CPace)</h3>
+            <p className="mono" style={{ color: "var(--muted)", margin: 0 }}>
+              Speak or type a one-shot code. Signalling relays opaque PAKE frames only — then P2P as
+              usual. Long ztc1: invites remain as fallback.
+            </p>
+            <button type="button" disabled={introBusy} onClick={() => void hostShortCodeIntro()}>
+              {introBusy && hostedShortCode === null ? "Waiting for peer…" : "Create short code"}
+            </button>
+            {hostedShortCode && (
+              <label>
+                Your short code (share out-of-band)
+                <input readOnly className="mono" value={hostedShortCode} aria-label="Hosted short code" />
+              </label>
+            )}
+            <label>
+              Join with short code
+              <input
+                className="mono"
+                value={shortCodeInput}
+                onChange={(e) => setShortCodeInput(e.target.value)}
+                placeholder="1234-quiet-otter"
+                aria-label="Join short code"
+              />
+            </label>
+            <button
+              type="button"
+              className="secondary"
+              disabled={introBusy || !shortCodeInput.trim()}
+              onClick={() => void joinShortCodeIntro()}
+            >
+              Join short code
+            </button>
+            <h3 style={{ marginBottom: 0 }}>Long invite (fallback)</h3>
             <label>
               Paste invitation code
               <textarea
@@ -769,6 +868,14 @@ export function App() {
                 <div className="v">{contacts.length}</div>
               </div>
               <div className="stat">
+                <div className="k">Server contacts (essential)</div>
+                <div className="v">{contactStats.essential}</div>
+              </div>
+              <div className="stat">
+                <div className="k">Server contacts (total)</div>
+                <div className="v">{contactStats.total}</div>
+              </div>
+              <div className="stat">
                 <div className="k">Server messages stored</div>
                 <div className="v">{serverStats?.messagesStored ?? 0}</div>
               </div>
@@ -783,6 +890,12 @@ export function App() {
                 </div>
               </div>
               <div className="stat">
+                <div className="k">Intro nameplates / frames</div>
+                <div className="v">
+                  {serverStats?.introNameplatesActive ?? "—"} / {serverStats?.introFramesRelayed ?? "—"}
+                </div>
+              </div>
+              <div className="stat">
                 <div className="k">Contacts on server</div>
                 <div className="v">{serverStats?.contactListsReceived ?? 0}</div>
               </div>
@@ -793,6 +906,16 @@ export function App() {
             </div>
             )}
             <div className="row" style={{ marginTop: "0.75rem" }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  si.resetServerContactStats();
+                  refresh();
+                }}
+              >
+                Reset contact counters
+              </button>
               <button
                 type="button"
                 className="secondary"

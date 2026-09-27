@@ -455,3 +455,17 @@ export const EMBEDDED_DEVELOPER_PUBLIC_KEY =
   "7133411ff89d3983863648858ded072bcdfd9bc3e230150af0c22aff00c37513";
 
 export { bytesToHex, hexToBytes, uuid, randomBytes };
+export {
+  generateIntroCode,
+  parseIntroCode,
+  beginCPace,
+  finishCPace,
+  shareToHex,
+  sealIntroIdentity,
+  openIntroIdentity,
+  encodeIntroFrame,
+  decodeIntroFrame,
+  type IntroIdentityPayload,
+  type CPaceLocalState,
+  type IntroWireFrame,
+} from "./intro.js";

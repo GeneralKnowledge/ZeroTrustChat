@@ -139,7 +139,8 @@ describe("ServerInterface API surface", () => {
     );
     expect(methods).toContain("fetchNetworkManifest");
     expect(methods).toContain("selectOfficialServer");
-    expect(methods).toContain("setCustomServer");
+    expect(methods).toContain("introClaim");
+    expect(methods).toContain("getServerContactStats");
     expect(methods).not.toContain("sendMessage");
     expect(methods).not.toContain("storeContact");
     expect(methods).not.toContain("uploadHistory");

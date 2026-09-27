@@ -74,6 +74,14 @@ export class SignallingServer {
   private sockets = new Map<string, WebSocket>(); // sessionId -> ws
   private peerToSession = new Map<string, string>(); // peerId -> sessionId
   private sessionToPeer = new Map<string, string>();
+  /**
+   * Short-lived PAKE intro nameplates (RAM only — never message storage).
+   * At most two sessions per nameplate; torn down on release/expiry.
+   */
+  private intros = new Map<
+    string,
+    { claimerSessionId: string; joinerSessionId: string | null; expiresAt: number }
+  >();
   /** Privacy audit counters — always zero for message content. */
   readonly counters = {
     messagesStored: 0 as const,
@@ -81,6 +89,8 @@ export class SignallingServer {
     contactListsReceived: 0 as const,
     privateKeysReceived: 0 as const,
     signallingMessagesRelayed: 0,
+    introNameplatesActive: 0,
+    introFramesRelayed: 0,
   };
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -175,6 +185,7 @@ export class SignallingServer {
     this.sockets.clear();
     this.peerToSession.clear();
     this.sessionToPeer.clear();
+    this.intros.clear();
     this.wss?.close();
     this.httpServer?.close();
     try {
@@ -216,6 +227,8 @@ export class SignallingServer {
       contactListsReceived: 0 as const,
       privateKeysReceived: 0 as const,
       signallingMessagesRelayed: this.counters.signallingMessagesRelayed,
+      introNameplatesActive: this.intros.size,
+      introFramesRelayed: this.counters.introFramesRelayed,
     };
   }
 
@@ -405,6 +418,133 @@ export class SignallingServer {
         });
         return boundSession;
       }
+      case "intro_claim": {
+        this.requireSession(msg.sessionId);
+        this.expireIntros();
+        const existing = this.intros.get(msg.nameplate);
+        if (existing && existing.expiresAt > Date.now()) {
+          this.send(ws, {
+            type: "error",
+            code: "intro_crowded",
+            message: "Nameplate already in use",
+          });
+          return boundSession;
+        }
+        const ttlCap = Date.now() + 10 * 60 * 1000;
+        const expiresAt = Math.min(msg.expiresAt, ttlCap);
+        this.intros.set(msg.nameplate, {
+          claimerSessionId: msg.sessionId,
+          joinerSessionId: null,
+          expiresAt,
+        });
+        this.send(ws, { type: "intro_claimed", nameplate: msg.nameplate, expiresAt });
+        log("info", "intro claimed", { nameplate: msg.nameplate });
+        return boundSession;
+      }
+      case "intro_join": {
+        this.requireSession(msg.sessionId);
+        this.expireIntros();
+        const slot = this.intros.get(msg.nameplate);
+        if (!slot || slot.expiresAt <= Date.now()) {
+          this.intros.delete(msg.nameplate);
+          this.send(ws, {
+            type: "error",
+            code: "intro_not_found",
+            message: "Intro nameplate missing or expired",
+          });
+          return boundSession;
+        }
+        if (slot.joinerSessionId) {
+          this.send(ws, {
+            type: "error",
+            code: "intro_crowded",
+            message: "Intro already has two peers",
+          });
+          return boundSession;
+        }
+        if (slot.claimerSessionId === msg.sessionId) {
+          this.send(ws, {
+            type: "error",
+            code: "intro_crowded",
+            message: "Cannot join own intro",
+          });
+          return boundSession;
+        }
+        slot.joinerSessionId = msg.sessionId;
+        this.send(ws, { type: "intro_joined", nameplate: msg.nameplate });
+        const claimerWs = this.sockets.get(slot.claimerSessionId);
+        if (claimerWs) {
+          this.send(claimerWs, { type: "intro_peer_joined", nameplate: msg.nameplate });
+        }
+        log("info", "intro joined", { nameplate: msg.nameplate });
+        return boundSession;
+      }
+      case "intro_relay": {
+        this.requireSession(msg.sessionId);
+        this.expireIntros();
+        const slot = this.intros.get(msg.nameplate);
+        if (!slot || slot.expiresAt <= Date.now()) {
+          this.intros.delete(msg.nameplate);
+          this.send(ws, {
+            type: "error",
+            code: "intro_expired",
+            message: "Intro expired",
+          });
+          return boundSession;
+        }
+        const peerSession =
+          msg.sessionId === slot.claimerSessionId
+            ? slot.joinerSessionId
+            : msg.sessionId === slot.joinerSessionId
+              ? slot.claimerSessionId
+              : null;
+        if (!peerSession) {
+          this.send(ws, {
+            type: "error",
+            code: "intro_not_found",
+            message: "Not a participant of this intro",
+          });
+          return boundSession;
+        }
+        const peerWs = this.sockets.get(peerSession);
+        if (!peerWs) {
+          this.send(ws, { type: "error", code: "peer_not_found", message: "Intro peer offline" });
+          return boundSession;
+        }
+        // Opaque only — never inspect PAKE / identity ciphertext
+        this.send(peerWs, {
+          type: "intro_frame",
+          nameplate: msg.nameplate,
+          opaquePayload: msg.opaquePayload,
+        });
+        this.counters.introFramesRelayed += 1;
+        return boundSession;
+      }
+      case "intro_release": {
+        this.requireSession(msg.sessionId);
+        const slot = this.intros.get(msg.nameplate);
+        if (
+          slot &&
+          (slot.claimerSessionId === msg.sessionId || slot.joinerSessionId === msg.sessionId)
+        ) {
+          this.intros.delete(msg.nameplate);
+          this.send(ws, { type: "intro_released", nameplate: msg.nameplate });
+          const other =
+            slot.claimerSessionId === msg.sessionId
+              ? slot.joinerSessionId
+              : slot.claimerSessionId;
+          if (other) {
+            const otherWs = this.sockets.get(other);
+            if (otherWs) {
+              this.send(otherWs, { type: "intro_released", nameplate: msg.nameplate });
+            }
+          }
+          log("info", "intro released", { nameplate: msg.nameplate });
+        } else {
+          this.send(ws, { type: "intro_released", nameplate: msg.nameplate });
+        }
+        return boundSession;
+      }
       case "get_stats": {
         this.requireSession(msg.sessionId);
         this.send(ws, this.getStats());
@@ -475,6 +615,14 @@ export class SignallingServer {
     const deleted = this.db.prepare(`DELETE FROM ephemeral_keys WHERE expires_at <= ?`).run(now);
     if (deleted.changes > 0) {
       log("debug", "expired ephemeral keys", { count: deleted.changes });
+    }
+    this.expireIntros();
+  }
+
+  private expireIntros(): void {
+    const now = Date.now();
+    for (const [np, slot] of this.intros) {
+      if (slot.expiresAt <= now) this.intros.delete(np);
     }
   }
 
