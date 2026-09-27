@@ -8,9 +8,20 @@ import { ServerInterface } from "@ztc/server-interface";
 
 export type P2pState = "disconnected" | "connecting" | "connected" | "failed";
 
+export type P2pEnvelopeKind =
+  | "chat"
+  | "group_chat"
+  | "group_sync"
+  | "group_epoch"
+  | "group_digest"
+  | "group_want"
+  | "group_have"
+  | "ack"
+  | "ping";
+
 export interface P2pEnvelope {
   v: 1;
-  kind: "chat" | "group_chat" | "group_sync" | "group_epoch" | "ack" | "ping";
+  kind: P2pEnvelopeKind;
   payload: unknown;
 }
 
@@ -150,6 +161,36 @@ export class P2pManager {
 
   isConnected(remotePeerId: string): boolean {
     return this.channels.get(remotePeerId)?.readyState === "open";
+  }
+
+  listConnectedPeers(): string[] {
+    const out: string[] = [];
+    for (const [peerId, ch] of this.channels) {
+      if (ch.readyState === "open") out.push(peerId);
+    }
+    return out;
+  }
+
+  listConnectingPeers(): string[] {
+    const out: string[] = [];
+    for (const [peerId, state] of this.states) {
+      if (state === "connecting") out.push(peerId);
+    }
+    return out;
+  }
+
+  /**
+   * Dial peers up to a device-wide degree cap. Never disconnects existing edges.
+   * Used by the shared group connection pool.
+   */
+  async ensureConnections(peerIds: string[], maxDegree: number): Promise<string[]> {
+    const connected = new Set(this.listConnectedPeers());
+    const connecting = new Set(this.listConnectingPeers());
+    const slots = Math.max(0, maxDegree - connected.size - connecting.size);
+    if (slots === 0) return [];
+    const targets = peerIds.filter((p) => !connected.has(p) && !connecting.has(p)).slice(0, slots);
+    await Promise.all(targets.map((t) => this.connectToPeer(t)));
+    return targets;
   }
 
   private getOrCreatePc(remotePeerId: string): RTCPeerConnection {
