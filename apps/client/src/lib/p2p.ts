@@ -5,6 +5,7 @@
  */
 
 import { ServerInterface } from "@ztc/server-interface";
+import type { P2pTransport } from "./p2pTransport";
 
 export type P2pState = "disconnected" | "connecting" | "connected" | "failed";
 
@@ -41,7 +42,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 // Prefer including host candidates for local prototype / same-machine e2e.
 
-export class P2pManager {
+export class P2pManager implements P2pTransport {
   private readonly si: ServerInterface;
   private readonly localPeerId: string;
   private readonly pcs = new Map<string, RTCPeerConnection>();

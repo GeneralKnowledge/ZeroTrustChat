@@ -12,9 +12,11 @@ import {
   type MessageKeyRecord,
 } from "@ztc/crypto";
 import { resolvePolicy, type SecurityMode, type SecurityPolicy } from "@ztc/shared";
-import type { P2pManager, P2pEnvelope } from "./p2p";
+import type { P2pEnvelope } from "./p2p";
+import type { P2pTransport } from "./p2pTransport";
 import type { LocalIdentity } from "./store";
-import * as store from "./store";
+import type { ChatStore } from "./memoryStore";
+import { defaultChatStore } from "./defaultStore";
 import { encodeAppMessage, parseAppMessage, type AppMessage } from "./appMessage";
 
 export interface ChatPayload {
@@ -34,19 +36,25 @@ export interface ChatPayload {
 }
 
 export class MessagingService {
-  private readonly p2p: P2pManager;
+  private readonly p2p: P2pTransport;
   private readonly identity: LocalIdentity;
+  private readonly store: ChatStore;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(p2p: P2pManager, identity: LocalIdentity) {
+  constructor(
+    p2p: P2pTransport,
+    identity: LocalIdentity,
+    chatStore: ChatStore = defaultChatStore,
+  ) {
     this.p2p = p2p;
     this.identity = identity;
+    this.store = chatStore;
     p2p.onData((from, env) => {
       if (env.kind === "chat") void this.handleIncoming(from, env.payload as ChatPayload);
       if (env.kind === "ack") {
         const { messageId } = env.payload as { messageId: string };
-        store.updateMessageStatus(messageId, "delivered");
-        store.removeOutbox(messageId);
+        this.store.updateMessageStatus(messageId, "delivered");
+        this.store.removeOutbox(messageId);
       }
     });
     p2p.onState((peerId, state) => {
@@ -56,7 +64,7 @@ export class MessagingService {
 
   start(): void {
     this.flushTimer = setInterval(() => {
-      store.deleteExpiredMessages();
+      this.store.deleteExpiredMessages();
       void this.flushAllOutbox();
     }, 2000);
   }
@@ -104,9 +112,9 @@ export class MessagingService {
     targetId: string,
     emoji: string,
   ): Promise<string> {
-    const mine = store.listReactions(targetId).find((r) => r.reactorId === this.identity.peerId);
+    const mine = this.store.listReactions(targetId).find((r) => r.reactorId === this.identity.peerId);
     const op = mine?.emoji === emoji ? "clear" : "set";
-    store.applyReaction(targetId, this.identity.peerId, emoji, op);
+    this.store.applyReaction(targetId, this.identity.peerId, emoji, op);
     return this.sendDirectApp(
       recipientPeerId,
       recipientPublicKey,
@@ -120,11 +128,11 @@ export class MessagingService {
     recipientPublicKey: string,
     targetId: string,
   ): Promise<string> {
-    const target = store.getMessage(targetId);
+    const target = this.store.getMessage(targetId);
     if (!target || target.senderId !== this.identity.peerId) {
       throw new Error("Can only delete your own messages");
     }
-    store.markMessageDeleted(targetId);
+    this.store.markMessageDeleted(targetId);
     return this.sendDirectApp(
       recipientPeerId,
       recipientPublicKey,
@@ -139,7 +147,7 @@ export class MessagingService {
     targetId: string,
     body: string,
   ): Promise<string> {
-    if (!store.applyMessageEdit(targetId, this.identity.peerId, body)) {
+    if (!this.store.applyMessageEdit(targetId, this.identity.peerId, body)) {
       throw new Error("Can only edit your own messages");
     }
     return this.sendDirectApp(
@@ -156,9 +164,9 @@ export class MessagingService {
     conversationId: string,
     targetId: string,
   ): Promise<string> {
-    const pinned = store.isPinned(conversationId, targetId);
+    const pinned = this.store.isPinned(conversationId, targetId);
     const op = pinned ? "clear" : "set";
-    store.applyPin(conversationId, targetId, this.identity.peerId, op);
+    this.store.applyPin(conversationId, targetId, this.identity.peerId, op);
     return this.sendDirectApp(
       recipientPeerId,
       recipientPublicKey,
@@ -195,7 +203,7 @@ export class MessagingService {
     const retentionDeadline =
       policy.retentionDeadlineMs !== undefined ? now + policy.retentionDeadlineMs : null;
 
-    store.saveMessageKey({
+    this.store.saveMessageKey({
       messageKeyId: messageKey.messageKeyId,
       keyHex: messageKey.key,
       decryptionDeadlineAt: messageKey.decryptionDeadlineAt ?? null,
@@ -219,7 +227,7 @@ export class MessagingService {
       encryptionMetadata: encrypted.encryptionMetadata,
     };
 
-    store.saveMessage({
+    this.store.saveMessage({
       messageId,
       conversationId,
       senderId: this.identity.peerId,
@@ -240,9 +248,9 @@ export class MessagingService {
     const envelope: P2pEnvelope = { v: 1, kind: "chat", payload };
     const sent = this.p2p.send(recipientPeerId, envelope);
     if (sent) {
-      store.updateMessageStatus(messageId, "delivered", plaintext);
+      this.store.updateMessageStatus(messageId, "delivered", plaintext);
     } else {
-      store.enqueueOutbox(
+      this.store.enqueueOutbox(
         messageId,
         recipientPeerId,
         JSON.stringify(envelope),
@@ -250,18 +258,18 @@ export class MessagingService {
         deliveryDeadline,
         retentionDeadline,
       );
-      store.updateMessageStatus(messageId, "pending", plaintext);
+      this.store.updateMessageStatus(messageId, "pending", plaintext);
     }
     return messageId;
   }
 
   tryDecryptLocal(messageId: string): string | null {
-    const messages = store.listAllMessages();
+    const messages = this.store.listAllMessages();
     const m = messages.find((x) => x.messageId === messageId);
     if (!m) return null;
     if (m.plaintextCache) return m.plaintextCache;
 
-    const keyRow = store.getMessageKey(m.messageKeyId);
+    const keyRow = this.store.getMessageKey(m.messageKeyId);
     if (!keyRow || keyRow.destroyed || !keyRow.keyHex) return null;
 
     const record: MessageKeyRecord = {
@@ -275,18 +283,28 @@ export class MessagingService {
     try {
       const plain = decryptWithMessageKey({ ciphertext: m.ciphertext, nonce: m.nonce }, record);
       if (record.destroyed) {
-        store.destroyStoredMessageKey(m.messageKeyId);
+        this.store.destroyStoredMessageKey(m.messageKeyId);
       }
-      store.updateMessageStatus(messageId, record.destroyed ? "key_destroyed" : "decrypted", plain);
+      this.store.updateMessageStatus(messageId, record.destroyed ? "key_destroyed" : "decrypted", plain);
       return plain;
     } catch {
-      store.destroyStoredMessageKey(m.messageKeyId);
+      this.store.destroyStoredMessageKey(m.messageKeyId);
       return null;
     }
   }
 
   private async handleIncoming(fromPeerId: string, payload: ChatPayload): Promise<void> {
-    const contact = store.listContacts().find((c) => c.peerId === fromPeerId);
+    // Dedupe: ignore duplicate delivery of the same messageId
+    if (this.store.getMessage(payload.messageId)) {
+      this.p2p.send(fromPeerId, {
+        v: 1,
+        kind: "ack",
+        payload: { messageId: payload.messageId },
+      });
+      return;
+    }
+
+    const contact = this.store.listContacts().find((c) => c.peerId === fromPeerId);
     const senderPub = contact?.publicKey ?? fromPeerId;
 
     let messageKey: MessageKeyRecord;
@@ -296,7 +314,7 @@ export class MessagingService {
       return;
     }
 
-    store.saveMessageKey({
+    this.store.saveMessageKey({
       messageKeyId: messageKey.messageKeyId,
       keyHex: messageKey.key,
       decryptionDeadlineAt: messageKey.decryptionDeadlineAt ?? null,
@@ -315,10 +333,10 @@ export class MessagingService {
     }
 
     if (messageKey.destroyed) {
-      store.destroyStoredMessageKey(messageKey.messageKeyId);
+      this.store.destroyStoredMessageKey(messageKey.messageKeyId);
     }
 
-    store.saveMessage({
+    this.store.saveMessage({
       messageId: payload.messageId,
       conversationId: payload.conversationId,
       senderId: payload.senderId,
@@ -336,7 +354,7 @@ export class MessagingService {
       plaintextCache: plaintext,
     });
 
-    if (plaintext) applyIncomingAppEffects(payload.senderId, plaintext);
+    if (plaintext) this.applyIncomingAppEffects(payload.senderId, plaintext);
 
     this.p2p.send(fromPeerId, {
       v: 1,
@@ -345,8 +363,27 @@ export class MessagingService {
     });
   }
 
+  private applyIncomingAppEffects(senderId: string, plaintext: string): void {
+    const app = parseAppMessage(plaintext);
+    if (app.type === "reaction") {
+      this.store.applyReaction(app.targetId, senderId, app.emoji, app.op);
+    } else if (app.type === "delete") {
+      const target = this.store.getMessage(app.targetId);
+      if (target && target.senderId === senderId) {
+        this.store.markMessageDeleted(app.targetId);
+      }
+    } else if (app.type === "edit") {
+      this.store.applyMessageEdit(app.targetId, senderId, app.body);
+    } else if (app.type === "pin") {
+      const target = this.store.getMessage(app.targetId);
+      if (target) {
+        this.store.applyPin(target.conversationId, app.targetId, senderId, app.op);
+      }
+    }
+  }
+
   private async flushAllOutbox(): Promise<void> {
-    const items = store.listOutbox();
+    const items = this.store.listOutbox();
     for (const item of items) {
       await this.flushOutboxFor(item.recipientPeerId);
     }
@@ -354,32 +391,13 @@ export class MessagingService {
 
   private async flushOutboxFor(peerId: string): Promise<void> {
     if (!this.p2p.isConnected(peerId)) return;
-    const items = store.listOutbox().filter((i) => i.recipientPeerId === peerId);
+    const items = this.store.listOutbox().filter((i) => i.recipientPeerId === peerId);
     for (const item of items) {
       const envelope = JSON.parse(item.payloadJson) as P2pEnvelope;
       if (this.p2p.send(peerId, envelope)) {
-        store.updateMessageStatus(item.messageId, "delivered");
-        store.removeOutbox(item.messageId);
+        this.store.updateMessageStatus(item.messageId, "delivered");
+        this.store.removeOutbox(item.messageId);
       }
-    }
-  }
-}
-
-function applyIncomingAppEffects(senderId: string, plaintext: string): void {
-  const app = parseAppMessage(plaintext);
-  if (app.type === "reaction") {
-    store.applyReaction(app.targetId, senderId, app.emoji, app.op);
-  } else if (app.type === "delete") {
-    const target = store.getMessage(app.targetId);
-    if (target && target.senderId === senderId) {
-      store.markMessageDeleted(app.targetId);
-    }
-  } else if (app.type === "edit") {
-    store.applyMessageEdit(app.targetId, senderId, app.body);
-  } else if (app.type === "pin") {
-    const target = store.getMessage(app.targetId);
-    if (target) {
-      store.applyPin(target.conversationId, app.targetId, senderId, app.op);
     }
   }
 }

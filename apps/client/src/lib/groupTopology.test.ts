@@ -3,6 +3,7 @@ import {
   buildGroupsByPeer,
   pickFanoutTargets,
   pickPeersToDial,
+  preferredHelpersForGroup,
   rankPeersForPool,
   DEFAULT_MAX_DEGREE,
 } from "./groupTopology";
@@ -87,5 +88,24 @@ describe("shared connection pool", () => {
     expect(ranked[0]).toBe("carol");
     const dial = pickPeersToDial(ranked, new Set(), new Set(), 8, 6);
     expect(dial.length).toBeLessThanOrEqual(6);
+  });
+
+  it("preferredHelpersForGroup is deterministic and within count", () => {
+    const members = Array.from({ length: 40 }, (_, i) => `m${i}`);
+    const a = preferredHelpersForGroup("g", members, 1, 42, 2);
+    const b = preferredHelpersForGroup("g", members, 1, 42, 2);
+    expect(a).toEqual(b);
+    expect(a).toHaveLength(2);
+    const preferred = new Set(a);
+    const ranked = rankPeersForPool({
+      localPeerId: "m0",
+      candidates: members.filter((m) => m !== "m0"),
+      groupsByPeer: buildGroupsByPeer("m0", [{ groupId: "g", members }]),
+      connected: new Set(),
+      preferredHelpers: preferred,
+      timeBucket: 42,
+    });
+    const dial = pickPeersToDial(ranked, new Set(), new Set(), DEFAULT_MAX_DEGREE);
+    expect(dial.length).toBeLessThanOrEqual(DEFAULT_MAX_DEGREE);
   });
 });

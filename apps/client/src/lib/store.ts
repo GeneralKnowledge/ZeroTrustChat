@@ -652,10 +652,14 @@ export function listOutbox(now = Date.now()): Array<{
   messageId: string;
   recipientPeerId: string;
   payloadJson: string;
+  createdAt: number;
+  deliveryDeadline: number | null;
+  retentionDeadline: number | null;
 }> {
   const d = requireDb();
   const res = d.exec(
-    `SELECT message_id, recipient_peer_id, payload_json FROM pending_outbox
+    `SELECT message_id, recipient_peer_id, payload_json, created_at, delivery_deadline, retention_deadline
+     FROM pending_outbox
      WHERE (delivery_deadline IS NULL OR delivery_deadline > ?)
        AND (retention_deadline IS NULL OR retention_deadline > ?)`,
     [now, now],
@@ -665,6 +669,9 @@ export function listOutbox(now = Date.now()): Array<{
     messageId: String(v[0]),
     recipientPeerId: String(v[1]),
     payloadJson: String(v[2]),
+    createdAt: Number(v[3]),
+    deliveryDeadline: v[4] == null ? null : Number(v[4]),
+    retentionDeadline: v[5] == null ? null : Number(v[5]),
   }));
 }
 
