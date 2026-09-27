@@ -1,12 +1,14 @@
 /**
  * Tiny in-band chat features encoded as encrypted plaintext JSON.
- * No media — text, reply pointer, reaction, and delete tombstone only.
+ * No media — text, reply, reaction, delete, edit, and pin only.
  */
 
 export type AppMessage =
   | { v: 1; type: "text"; body: string; replyTo?: string }
   | { v: 1; type: "reaction"; targetId: string; emoji: string; op: "set" | "clear" }
-  | { v: 1; type: "delete"; targetId: string };
+  | { v: 1; type: "delete"; targetId: string }
+  | { v: 1; type: "edit"; targetId: string; body: string }
+  | { v: 1; type: "pin"; targetId: string; op: "set" | "clear" };
 
 export function encodeAppMessage(msg: AppMessage): string {
   return JSON.stringify(msg);
@@ -47,6 +49,32 @@ export function parseAppMessage(plaintext: string): AppMessage {
       ) {
         return { v: 1, type: "delete", targetId: (parsed as { targetId: string }).targetId };
       }
+      if (
+        parsed.v === 1 &&
+        parsed.type === "edit" &&
+        typeof (parsed as { targetId?: unknown }).targetId === "string" &&
+        typeof (parsed as { body?: unknown }).body === "string"
+      ) {
+        return {
+          v: 1,
+          type: "edit",
+          targetId: (parsed as { targetId: string }).targetId,
+          body: (parsed as { body: string }).body,
+        };
+      }
+      if (
+        parsed.v === 1 &&
+        parsed.type === "pin" &&
+        typeof (parsed as { targetId?: unknown }).targetId === "string"
+      ) {
+        const op = (parsed as { op?: string }).op === "clear" ? "clear" : "set";
+        return {
+          v: 1,
+          type: "pin",
+          targetId: (parsed as { targetId: string }).targetId,
+          op,
+        };
+      }
     } catch {
       // fall through
     }
@@ -55,7 +83,12 @@ export function parseAppMessage(plaintext: string): AppMessage {
 }
 
 export function isHiddenControlMessage(msg: AppMessage): boolean {
-  return msg.type === "reaction" || msg.type === "delete";
+  return (
+    msg.type === "reaction" ||
+    msg.type === "delete" ||
+    msg.type === "edit" ||
+    msg.type === "pin"
+  );
 }
 
 export function displayBody(plaintext: string | null): string {
@@ -63,6 +96,6 @@ export function displayBody(plaintext: string | null): string {
   const msg = parseAppMessage(plaintext);
   if (msg.type === "text") return msg.body;
   if (msg.type === "reaction") return `${msg.emoji}`;
-  if (msg.type === "delete") return "";
+  if (msg.type === "delete" || msg.type === "edit" || msg.type === "pin") return "";
   return plaintext;
 }
