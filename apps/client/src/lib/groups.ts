@@ -41,6 +41,7 @@ import {
   preferredHelpersForGroup,
   rankPeersForPool,
 } from "./groupTopology";
+import { encodeAppMessage, parseAppMessage, type AppMessage } from "./appMessage";
 
 export interface GroupChatPayload {
   groupId: string;
@@ -255,11 +256,49 @@ export class GroupService {
   }
 
   sendGroupMessage(groupId: string, plaintext: string, deliveryDeadlineMs?: number): string {
+    return this.sendGroupApp(groupId, { v: 1, type: "text", body: plaintext }, deliveryDeadlineMs);
+  }
+
+  sendGroupReply(
+    groupId: string,
+    body: string,
+    replyTo: string,
+    deliveryDeadlineMs?: number,
+  ): string {
+    return this.sendGroupApp(
+      groupId,
+      { v: 1, type: "text", body, replyTo },
+      deliveryDeadlineMs,
+    );
+  }
+
+  sendGroupReaction(groupId: string, targetId: string, emoji: string): string {
+    const mine = store.listReactions(targetId).find((r) => r.reactorId === this.identity.peerId);
+    const op = mine?.emoji === emoji ? "clear" : "set";
+    store.applyReaction(targetId, this.identity.peerId, emoji, op);
+    return this.sendGroupApp(groupId, { v: 1, type: "reaction", targetId, emoji, op });
+  }
+
+  sendGroupDelete(groupId: string, targetId: string): string {
+    const target = store.getMessage(targetId);
+    if (!target || target.senderId !== this.identity.peerId) {
+      throw new Error("Can only delete your own messages");
+    }
+    store.markMessageDeleted(targetId);
+    return this.sendGroupApp(groupId, { v: 1, type: "delete", targetId });
+  }
+
+  private sendGroupApp(
+    groupId: string,
+    app: AppMessage,
+    deliveryDeadlineMs?: number,
+  ): string {
     const g = store.getGroup(groupId);
     if (!g) throw new Error("Group not found");
     const members = JSON.parse(g.membersJson) as string[];
     if (!members.includes(this.identity.peerId)) throw new Error("Not a member");
 
+    const plaintext = encodeAppMessage(app);
     const epochKey: GroupEpochKey = {
       groupId,
       epoch: g.epoch,
@@ -541,6 +580,18 @@ export class GroupService {
       securityMode: "normal",
       plaintextCache: plaintext,
     });
+
+    if (plaintext) {
+      const app = parseAppMessage(plaintext);
+      if (app.type === "reaction") {
+        store.applyReaction(app.targetId, payload.senderId, app.emoji, app.op);
+      } else if (app.type === "delete") {
+        const target = store.getMessage(app.targetId);
+        if (target && target.senderId === payload.senderId) {
+          store.markMessageDeleted(app.targetId);
+        }
+      }
+    }
 
     if (shouldForward && !this.forwarded.has(payload.messageId)) {
       this.forwarded.add(payload.messageId);

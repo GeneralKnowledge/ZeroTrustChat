@@ -167,6 +167,12 @@ export async function openLocalStore(): Promise<Database> {
       manifest_json TEXT,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id TEXT NOT NULL,
+      reactor_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      PRIMARY KEY (message_id, reactor_id)
+    );
   `);
   // Migrations for multi-device + signed epochs (sql.js supports ADD COLUMN).
   const migrations = [
@@ -174,6 +180,12 @@ export async function openLocalStore(): Promise<Database> {
     "ALTER TABLE identity ADD COLUMN signing_private_key TEXT",
     "ALTER TABLE identity ADD COLUMN device_id TEXT",
     "ALTER TABLE contacts ADD COLUMN signing_public_key TEXT",
+    `CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id TEXT NOT NULL,
+      reactor_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      PRIMARY KEY (message_id, reactor_id)
+    )`,
   ];
   for (const sql of migrations) {
     try {
@@ -354,6 +366,74 @@ export function updateMessageStatus(messageId: string, status: MessageStatus, pl
     d.run("UPDATE messages SET status = ? WHERE message_id = ?", [status, messageId]);
   }
   persist();
+}
+
+/** Set or clear a reaction (idempotent — safe under gossip duplicates). */
+export function applyReaction(
+  messageId: string,
+  reactorId: string,
+  emoji: string,
+  op: "set" | "clear" = "set",
+): void {
+  const d = requireDb();
+  if (op === "clear") {
+    d.run(`DELETE FROM message_reactions WHERE message_id = ? AND reactor_id = ?`, [
+      messageId,
+      reactorId,
+    ]);
+  } else {
+    d.run(
+      `INSERT OR REPLACE INTO message_reactions (message_id, reactor_id, emoji) VALUES (?, ?, ?)`,
+      [messageId, reactorId, emoji],
+    );
+  }
+  persist();
+}
+
+export function listReactions(messageId: string): Array<{ reactorId: string; emoji: string }> {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT reactor_id, emoji FROM message_reactions WHERE message_id = ?`,
+    [messageId],
+  );
+  if (!res[0]) return [];
+  return res[0].values.map((v) => ({
+    reactorId: String(v[0]),
+    emoji: String(v[1]),
+  }));
+}
+
+/** Aggregate emoji → count for UI pills. */
+export function reactionSummary(messageId: string): Array<{ emoji: string; count: number }> {
+  const all = listReactions(messageId);
+  const map = new Map<string, number>();
+  for (const r of all) {
+    map.set(r.emoji, (map.get(r.emoji) ?? 0) + 1);
+  }
+  return [...map.entries()].map(([emoji, count]) => ({ emoji, count }));
+}
+
+export function markMessageDeleted(messageId: string): void {
+  const d = requireDb();
+  d.run(`UPDATE messages SET status = ?, plaintext_cache = ? WHERE message_id = ?`, [
+    "deleted",
+    null,
+    messageId,
+  ]);
+  persist();
+}
+
+export function getMessage(messageId: string): StoredMessage | null {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT message_id, conversation_id, sender_id, ciphertext, nonce, message_key_id,
+            created_at, delivery_deadline, decryption_deadline, retention_deadline,
+            status, encryption_metadata, wrapped_key, security_mode, plaintext_cache
+     FROM messages WHERE message_id = ?`,
+    [messageId],
+  );
+  if (!res[0]?.values[0]) return null;
+  return rowToMessage(res[0].values[0]);
 }
 
 export function saveMessageKey(k: MessageKeyRow): void {

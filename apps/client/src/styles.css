@@ -189,6 +189,34 @@ button:disabled {
   margin-bottom: 0.25rem;
 }
 
+.reply-quote {
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-left: 2px solid var(--accent);
+  padding-left: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.reply-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.35rem 0.5rem;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}
+
+.reaction-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

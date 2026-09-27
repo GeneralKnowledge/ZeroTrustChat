@@ -12,6 +12,7 @@ import { P2pManager } from "./lib/p2p";
 import { MessagingService } from "./lib/messaging";
 import { GroupService } from "./lib/groups";
 import * as store from "./lib/store";
+import { displayBody, isHiddenControlMessage, parseAppMessage } from "./lib/appMessage";
 
 const DEFAULT_WS = import.meta.env.VITE_WS_URL ?? "ws://localhost:8787";
 const DEFAULT_BOOTSTRAP =
@@ -48,6 +49,7 @@ export function App() {
   const [backupBlob, setBackupBlob] = useState("");
   const [importBlob, setImportBlob] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
+  const [replyToId, setReplyToId] = useState<string | null>(null);
 
   const refresh = useEffectEvent(() => {
     startTransition(() => setTick((t) => t + 1));
@@ -280,6 +282,7 @@ export function App() {
   async function connectPeer(peerId: string) {
     setActivePeer(peerId);
     setActiveGroup(null);
+    setReplyToId(null);
     await p2p.connectToPeer(peerId);
     refresh();
   }
@@ -287,8 +290,13 @@ export function App() {
   async function send() {
     if (!draft.trim()) return;
     if (activeGroup) {
-      groups.sendGroupMessage(activeGroup, draft.trim());
+      if (replyToId) {
+        groups.sendGroupReply(activeGroup, draft.trim(), replyToId);
+      } else {
+        groups.sendGroupMessage(activeGroup, draft.trim());
+      }
       setDraft("");
+      setReplyToId(null);
       refresh();
       return;
     }
@@ -299,9 +307,49 @@ export function App() {
       mode === "time_limited" && decryptUntil
         ? { decryptionDeadlineAt: new Date(decryptUntil).getTime() }
         : undefined;
-    await messaging.sendDirect(activePeer, contact.publicKey, draft.trim(), mode, overrides);
+    if (replyToId) {
+      await messaging.sendReply(
+        activePeer,
+        contact.publicKey,
+        draft.trim(),
+        replyToId,
+        mode,
+        overrides,
+      );
+    } else {
+      await messaging.sendDirect(activePeer, contact.publicKey, draft.trim(), mode, overrides);
+    }
     setDraft("");
+    setReplyToId(null);
     refresh();
+  }
+
+  async function reactTo(messageId: string) {
+    if (activeGroup) {
+      groups.sendGroupReaction(activeGroup, messageId, "👍");
+      refresh();
+      return;
+    }
+    if (!activePeer) return;
+    const contact = contacts.find((c) => c.peerId === activePeer);
+    if (!contact) return;
+    await messaging.sendReaction(activePeer, contact.publicKey, messageId, "👍");
+    refresh();
+  }
+
+  async function deleteMsg(messageId: string) {
+    try {
+      if (activeGroup) {
+        groups.sendGroupDelete(activeGroup, messageId);
+      } else if (activePeer) {
+        const contact = contacts.find((c) => c.peerId === activePeer);
+        if (!contact) return;
+        await messaging.sendDelete(activePeer, contact.publicKey, messageId);
+      }
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
   }
 
   function createGroup() {
@@ -690,38 +738,99 @@ export function App() {
             )}
 
             <div className="messages">
-              {messages.map((m) => (
-                <div
-                  key={m.messageId}
-                  className={`bubble ${m.senderId === identity.peerId ? "mine" : ""}`}
-                >
-                  <div className="meta">
-                    {m.senderId.slice(0, 10)}… · {m.status} · {m.securityMode}
-                    {m.decryptionDeadline
-                      ? ` · decrypt≠after ${new Date(m.decryptionDeadline).toLocaleTimeString()}`
-                      : ""}
-                  </div>
-                  <div>
-                    {m.plaintextCache ?? (
-                      <span className="pill danger">ciphertext only (key unavailable)</span>
-                    )}
-                  </div>
-                  {!m.plaintextCache && (
-                    <button
-                      type="button"
-                      className="secondary"
-                      style={{ marginTop: "0.4rem" }}
-                      onClick={() => {
-                        messaging.tryDecryptLocal(m.messageId);
-                        groups.decryptStoredGroupMessage(m.messageId);
-                        refresh();
-                      }}
+              {messages
+                .filter((m) => {
+                  if (m.status === "deleted") return true; // show tombstone
+                  if (!m.plaintextCache) return true;
+                  return !isHiddenControlMessage(parseAppMessage(m.plaintextCache));
+                })
+                .map((m) => {
+                  const app = m.plaintextCache ? parseAppMessage(m.plaintextCache) : null;
+                  const replyParent =
+                    app?.type === "text" && app.replyTo ? store.getMessage(app.replyTo) : null;
+                  const replySnippet = replyParent
+                    ? replyParent.status === "deleted"
+                      ? "(deleted)"
+                      : displayBody(replyParent.plaintextCache)
+                    : null;
+                  const reactions = store.reactionSummary(m.messageId);
+                  return (
+                    <div
+                      key={m.messageId}
+                      className={`bubble ${m.senderId === identity.peerId ? "mine" : ""}`}
                     >
-                      Try decrypt
-                    </button>
-                  )}
-                </div>
-              ))}
+                      <div className="meta">
+                        {m.senderId.slice(0, 10)}… · {m.status} · {m.securityMode}
+                        {m.decryptionDeadline
+                          ? ` · decrypt≠after ${new Date(m.decryptionDeadline).toLocaleTimeString()}`
+                          : ""}
+                      </div>
+                      {replySnippet != null && (
+                        <div className="reply-quote">
+                          Replying: {replySnippet.slice(0, 80) || "…"}
+                        </div>
+                      )}
+                      <div>
+                        {m.status === "deleted" ? (
+                          <span className="pill warn">Message deleted</span>
+                        ) : (
+                          displayBody(m.plaintextCache) || (
+                            <span className="pill danger">ciphertext only (key unavailable)</span>
+                          )
+                        )}
+                      </div>
+                      {reactions.length > 0 && (
+                        <div className="reaction-row">
+                          {reactions.map((r) => (
+                            <span className="pill" key={r.emoji}>
+                              {r.emoji} {r.count}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {m.status !== "deleted" && (
+                        <div className="row" style={{ marginTop: "0.4rem", gap: "0.35rem" }}>
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => setReplyToId(m.messageId)}
+                          >
+                            Reply
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void reactTo(m.messageId)}
+                          >
+                            👍
+                          </button>
+                          {m.senderId === identity.peerId && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => void deleteMsg(m.messageId)}
+                            >
+                              Delete
+                            </button>
+                          )}
+                          {!m.plaintextCache && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => {
+                                messaging.tryDecryptLocal(m.messageId);
+                                groups.decryptStoredGroupMessage(m.messageId);
+                                refresh();
+                              }}
+                            >
+                              Try decrypt
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
             </div>
 
             {(activePeer || activeGroup) && (
@@ -763,6 +872,14 @@ export function App() {
                           Remove {m.slice(0, 8)}… (new epoch)
                         </button>
                       ))}
+                  </div>
+                )}
+                {replyToId && (
+                  <div className="reply-banner">
+                    Replying to {replyToId.slice(0, 8)}…
+                    <button type="button" className="secondary" onClick={() => setReplyToId(null)}>
+                      Cancel
+                    </button>
                   </div>
                 )}
                 <label>
