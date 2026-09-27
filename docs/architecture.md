@@ -127,7 +127,7 @@ flowchart LR
   M --> Mesh[P2P mesh DataChannels]
 ```
 
-Prototype historically used a full mesh for small groups. Large-group delivery now uses a **shared connection pool** and **gossip + compressed digests** — see [Distributed group chat](distributed-group-chat.md). Soft helpers / MLS remain future work.
+Prototype historically used a full mesh for small groups. Large-group delivery now uses a **shared connection pool**, **gossip + compressed digests**, **signed epoch key-wrap**, and **soft helper preference within the degree budget** — see [Distributed group chat](distributed-group-chat.md). MLS and push tickles remain future work.
 
 ## 9. Group membership changes
 
@@ -150,7 +150,7 @@ flowchart LR
   Peers --> Offline[Offline members: local retain + sync on reconnect]
 ```
 
-**Prototype (updated):** sender fans out to a small set of live pool neighbors; gossip + digest anti-entropy repair the rest. **Still designed, not fully built:** soft temporary helpers, signed epoch key-wrap — see [Distributed group chat](distributed-group-chat.md).
+**Prototype (updated):** sender fans out to a small set of live pool neighbors; gossip + digest anti-entropy repair the rest. Soft helper ranking (capability ads on existing edges only) and signed epoch key-wrap are implemented — see [Distributed group chat](distributed-group-chat.md). MLS and push tickles remain out of scope.
 
 ## Package boundaries
 
@@ -174,8 +174,8 @@ The prototype uses a **shared AES-256-GCM group key per cryptographic epoch**:
 **Must strengthen for production:**
 
 - Replace ad-hoc key distribution with MLS (or similar continuous group key agreement).
-- Authenticate epoch announcements (signatures / membership proofs).
 - Persist prior epoch keys only under explicit policy; currently only the current epoch key is kept locally.
 - Handle concurrent membership changes and partitions.
 - Forward secrecy beyond simple epoch rotation.
-- Scale beyond full mesh using the [distributed group chat design](distributed-group-chat.md).
+- Soft helpers today are preference-within-budget only (no election/rotation beyond pool ranking).
+- Scale further using the [distributed group chat design](distributed-group-chat.md).

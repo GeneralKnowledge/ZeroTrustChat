@@ -266,4 +266,42 @@ describe("GroupService FakeP2P simulation", () => {
     expect(bob.store.getMessage(payload.messageId)).not.toBeNull();
     expect(groupMessageIds(bob, groupId).size).toBeGreaterThanOrEqual(2);
   });
+
+  it("idle: no groups → ensureTopology does not dial; anti-entropy sends nothing", async () => {
+    const hub = new FakeP2pHub();
+    const alice = createSimPeer(hub, "alice");
+    const bob = createSimPeer(hub, "bob");
+    track(alice, bob);
+    linkContacts([alice, bob]);
+
+    const before = hub.metrics().totalSends();
+    await alice.groups.tickAntiEntropy();
+    expect(hub.metrics().totalSends()).toBe(before);
+    expect(alice.p2p.listConnectedPeers()).toHaveLength(0);
+    expect(hub.isLinked(alice.identity.peerId, bob.identity.peerId)).toBe(false);
+  });
+
+  it("idle: groups exist but no live peers → anti-entropy sends nothing", async () => {
+    const hub = new FakeP2pHub();
+    const alice = createSimPeer(hub, "alice");
+    const bob = createSimPeer(hub, "bob");
+    track(alice, bob);
+    linkContacts([alice, bob]);
+
+    alice.groups.createGroup("lonely", [bob.identity.peerId]);
+    // Partition so topology cannot open an edge; anti-entropy must stay quiet.
+    hub.partition([[alice.identity.peerId], [bob.identity.peerId]]);
+    expect(alice.p2p.listConnectedPeers()).toHaveLength(0);
+    const before = hub.metrics().totalSends();
+    const digestBefore = hub.deliveryLog.filter(
+      (d) => d.kind === "group_digest" || d.kind === "group_capability",
+    ).length;
+    await alice.groups.tickAntiEntropy();
+    expect(hub.metrics().totalSends()).toBe(before);
+    expect(alice.p2p.listConnectedPeers()).toHaveLength(0);
+    const digestAfter = hub.deliveryLog.filter(
+      (d) => d.kind === "group_digest" || d.kind === "group_capability",
+    ).length;
+    expect(digestAfter).toBe(digestBefore);
+  });
 });

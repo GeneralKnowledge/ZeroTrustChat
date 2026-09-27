@@ -187,6 +187,8 @@ export class GroupService {
       members: JSON.parse(g.membersJson) as string[],
       epoch: g.epoch,
     }));
+    // Idle: no groups → no dial attempts / signalling spikes.
+    if (groups.length === 0) return;
     const groupsByPeer = buildGroupsByPeer(
       this.identity.peerId,
       groups.map((g) => ({ groupId: g.groupId, members: g.members })),
@@ -715,7 +717,11 @@ export class GroupService {
   }
 
   private runAntiEntropy(): void {
-    for (const g of this.store.listGroups()) {
+    const groups = this.store.listGroups();
+    // Idle: nothing to sync, and no live peers to talk to.
+    if (groups.length === 0) return;
+    if (this.p2p.listConnectedPeers().length === 0) return;
+    for (const g of groups) {
       const members = JSON.parse(g.membersJson) as string[];
       const connected = members.filter(
         (m) => m !== this.identity.peerId && this.p2p.isConnected(m),

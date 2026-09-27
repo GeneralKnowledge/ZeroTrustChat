@@ -52,6 +52,11 @@ export function App() {
   const [importPassphrase, setImportPassphrase] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  /** Developer dashboard expanded — controls get_stats polling only. */
+  const [devDashboardOpen, setDevDashboardOpen] = useState(true);
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
 
   const refresh = useEffectEvent(() => {
     startTransition(() => setTick((t) => t + 1));
@@ -195,19 +200,42 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const onVis = () => setPageVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // Local-only refresh: expiry cleanup + UI tick — never hits the signalling server.
+  useEffect(() => {
     if (!runtime) return;
-    const id = setInterval(async () => {
+    const id = setInterval(() => {
       store.deleteExpiredMessages();
-      try {
-        const stats = await runtime.si.fetchServerStats();
-        setServerStats(stats);
-      } catch {
-        // server may be down — P2P can continue
-      }
       refresh();
     }, 2000);
     return () => clearInterval(id);
   }, [runtime]);
+
+  // get_stats only while the developer dashboard is open and the tab is visible.
+  useEffect(() => {
+    if (!runtime || !devDashboardOpen || !pageVisible) return;
+    let cancelled = false;
+    const pull = async () => {
+      try {
+        const stats = await runtime.si.fetchServerStats();
+        if (!cancelled) setServerStats(stats);
+      } catch {
+        // server may be down — P2P can continue
+      }
+    };
+    void pull();
+    const id = setInterval(() => {
+      void pull();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [runtime, devDashboardOpen, pageVisible]);
 
   async function switchServer(apply: (si: ServerInterface) => void): Promise<void> {
     if (!runtime) return;
@@ -266,6 +294,7 @@ export function App() {
   const p2pStats = p2p.getAggregateStats();
   const pending = store.countByStatus("pending");
   const expired = store.countByStatus("expired") + store.countByStatus("key_destroyed");
+  const outboxPending = store.listOutbox().length;
   const verified = si.getVerifiedServer();
   void tick;
 
@@ -689,8 +718,24 @@ export function App() {
 
         <main className="stack">
           <section className="panel">
-            <h2>Developer dashboard</h2>
-            <div className="stat-grid">
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <h2 style={{ margin: 0 }}>Developer dashboard</h2>
+              <button
+                type="button"
+                className="secondary"
+                aria-expanded={devDashboardOpen}
+                onClick={() => setDevDashboardOpen((o) => !o)}
+              >
+                {devDashboardOpen ? "Hide stats" : "Show stats"}
+              </button>
+            </div>
+            {outboxPending > 0 && (
+              <p className="pill warn" style={{ marginTop: "0.5rem" }}>
+                Local outbox: {outboxPending} pending (never uploaded)
+              </p>
+            )}
+            {devDashboardOpen && (
+            <div className="stat-grid" style={{ marginTop: "0.75rem" }}>
               <div className="stat">
                 <div className="k">Signalling</div>
                 <div className="v">{si.getConnectionState()}</div>
@@ -714,6 +759,10 @@ export function App() {
                 <div className="v">
                   {pending} / {expired}
                 </div>
+              </div>
+              <div className="stat">
+                <div className="k">Outbox</div>
+                <div className="v">{outboxPending}</div>
               </div>
               <div className="stat">
                 <div className="k">Local contacts</div>
@@ -742,6 +791,7 @@ export function App() {
                 <div className="v">{serverStats?.privateKeysReceived ?? 0}</div>
               </div>
             </div>
+            )}
             <div className="row" style={{ marginTop: "0.75rem" }}>
               <button
                 type="button"
