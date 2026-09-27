@@ -15,6 +15,7 @@ import { resolvePolicy, type SecurityMode, type SecurityPolicy } from "@ztc/shar
 import type { P2pManager, P2pEnvelope } from "./p2p";
 import type { LocalIdentity } from "./store";
 import * as store from "./store";
+import { encodeAppMessage, parseAppMessage, type AppMessage } from "./appMessage";
 
 export interface ChatPayload {
   messageId: string;
@@ -71,6 +72,75 @@ export class MessagingService {
     mode: SecurityMode,
     overrides?: Partial<SecurityPolicy>,
   ): Promise<string> {
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "text", body: plaintext },
+      mode,
+      overrides,
+    );
+  }
+
+  async sendReply(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    body: string,
+    replyTo: string,
+    mode: SecurityMode,
+    overrides?: Partial<SecurityPolicy>,
+  ): Promise<string> {
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "text", body, replyTo },
+      mode,
+      overrides,
+    );
+  }
+
+  async sendReaction(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    targetId: string,
+    emoji: string,
+  ): Promise<string> {
+    const mine = store.listReactions(targetId).find((r) => r.reactorId === this.identity.peerId);
+    const op = mine?.emoji === emoji ? "clear" : "set";
+    store.applyReaction(targetId, this.identity.peerId, emoji, op);
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "reaction", targetId, emoji, op },
+      "normal",
+    );
+  }
+
+  async sendDelete(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    targetId: string,
+  ): Promise<string> {
+    const target = store.getMessage(targetId);
+    if (!target || target.senderId !== this.identity.peerId) {
+      throw new Error("Can only delete your own messages");
+    }
+    store.markMessageDeleted(targetId);
+    return this.sendDirectApp(
+      recipientPeerId,
+      recipientPublicKey,
+      { v: 1, type: "delete", targetId },
+      "normal",
+    );
+  }
+
+  private async sendDirectApp(
+    recipientPeerId: string,
+    recipientPublicKey: string,
+    app: AppMessage,
+    mode: SecurityMode,
+    overrides?: Partial<SecurityPolicy>,
+  ): Promise<string> {
+    const plaintext = encodeAppMessage(app);
     const now = Date.now();
     const policy = resolvePolicy(mode, overrides, now);
     const messageKey = generateMessageKey({
@@ -130,7 +200,7 @@ export class MessagingService {
       encryptionMetadata: JSON.stringify(encrypted.encryptionMetadata),
       wrappedKey,
       securityMode: mode,
-      plaintextCache: plaintext, // local sender convenience; ciphertext is authoritative in DB
+      plaintextCache: plaintext,
     });
 
     const envelope: P2pEnvelope = { v: 1, kind: "chat", payload };
@@ -138,7 +208,6 @@ export class MessagingService {
     if (sent) {
       store.updateMessageStatus(messageId, "delivered", plaintext);
     } else {
-      // Offline: keep locally — NEVER upload to server
       store.enqueueOutbox(
         messageId,
         recipientPeerId,
@@ -233,6 +302,8 @@ export class MessagingService {
       plaintextCache: plaintext,
     });
 
+    if (plaintext) applyIncomingAppEffects(payload.senderId, plaintext);
+
     this.p2p.send(fromPeerId, {
       v: 1,
       kind: "ack",
@@ -256,6 +327,18 @@ export class MessagingService {
         store.updateMessageStatus(item.messageId, "delivered");
         store.removeOutbox(item.messageId);
       }
+    }
+  }
+}
+
+function applyIncomingAppEffects(senderId: string, plaintext: string): void {
+  const app = parseAppMessage(plaintext);
+  if (app.type === "reaction") {
+    store.applyReaction(app.targetId, senderId, app.emoji, app.op);
+  } else if (app.type === "delete") {
+    const target = store.getMessage(app.targetId);
+    if (target && target.senderId === senderId) {
+      store.markMessageDeleted(app.targetId);
     }
   }
 }

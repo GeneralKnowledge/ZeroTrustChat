@@ -21,6 +21,10 @@ export interface LocalIdentity {
   publicKey: string;
   privateKey: string;
   displayName: string;
+  signingPublicKey: string;
+  signingPrivateKey: string;
+  /** Per-install id — not part of identity backup; namespaces senderSeq. */
+  deviceId: string;
 }
 
 export interface Contact {
@@ -29,6 +33,7 @@ export interface Contact {
   displayName: string;
   invitationCode: string;
   addedAt: number;
+  signingPublicKey: string | null;
 }
 
 export interface StoredMessage {
@@ -162,7 +167,33 @@ export async function openLocalStore(): Promise<Database> {
       manifest_json TEXT,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id TEXT NOT NULL,
+      reactor_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      PRIMARY KEY (message_id, reactor_id)
+    );
   `);
+  // Migrations for multi-device + signed epochs (sql.js supports ADD COLUMN).
+  const migrations = [
+    "ALTER TABLE identity ADD COLUMN signing_public_key TEXT",
+    "ALTER TABLE identity ADD COLUMN signing_private_key TEXT",
+    "ALTER TABLE identity ADD COLUMN device_id TEXT",
+    "ALTER TABLE contacts ADD COLUMN signing_public_key TEXT",
+    `CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id TEXT NOT NULL,
+      reactor_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      PRIMARY KEY (message_id, reactor_id)
+    )`,
+  ];
+  for (const sql of migrations) {
+    try {
+      db.run(sql);
+    } catch {
+      // column already exists
+    }
+  }
   persist();
   return db;
 }
@@ -182,7 +213,11 @@ export function persist(): void {
 
 export function getIdentity(): LocalIdentity | null {
   const d = requireDb();
-  const row = d.exec("SELECT peer_id, public_key, private_key, display_name FROM identity WHERE id = 1");
+  const row = d.exec(
+    `SELECT peer_id, public_key, private_key, display_name,
+            signing_public_key, signing_private_key, device_id
+     FROM identity WHERE id = 1`,
+  );
   if (!row[0]?.values[0]) return null;
   const v = row[0].values[0];
   return {
@@ -190,24 +225,39 @@ export function getIdentity(): LocalIdentity | null {
     publicKey: String(v[1]),
     privateKey: String(v[2]),
     displayName: String(v[3]),
+    signingPublicKey: v[4] == null ? "" : String(v[4]),
+    signingPrivateKey: v[5] == null ? "" : String(v[5]),
+    deviceId: v[6] == null || String(v[6]) === "" ? "" : String(v[6]),
   };
 }
 
 export function saveIdentity(id: LocalIdentity): void {
   const d = requireDb();
   d.run("DELETE FROM identity");
-  d.run("INSERT INTO identity (id, peer_id, public_key, private_key, display_name) VALUES (1, ?, ?, ?, ?)", [
-    id.peerId,
-    id.publicKey,
-    id.privateKey,
-    id.displayName,
-  ]);
+  d.run(
+    `INSERT INTO identity (
+      id, peer_id, public_key, private_key, display_name,
+      signing_public_key, signing_private_key, device_id
+    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id.peerId,
+      id.publicKey,
+      id.privateKey,
+      id.displayName,
+      id.signingPublicKey,
+      id.signingPrivateKey,
+      id.deviceId,
+    ],
+  );
   persist();
 }
 
 export function listContacts(): Contact[] {
   const d = requireDb();
-  const res = d.exec("SELECT peer_id, public_key, display_name, invitation_code, added_at FROM contacts ORDER BY added_at");
+  const res = d.exec(
+    `SELECT peer_id, public_key, display_name, invitation_code, added_at, signing_public_key
+     FROM contacts ORDER BY added_at`,
+  );
   if (!res[0]) return [];
   return res[0].values.map((v) => ({
     peerId: String(v[0]),
@@ -215,15 +265,17 @@ export function listContacts(): Contact[] {
     displayName: String(v[2]),
     invitationCode: String(v[3]),
     addedAt: Number(v[4]),
+    signingPublicKey: v[5] == null || String(v[5]) === "" ? null : String(v[5]),
   }));
 }
 
 export function upsertContact(c: Contact): void {
   const d = requireDb();
   d.run(
-    `INSERT OR REPLACE INTO contacts (peer_id, public_key, display_name, invitation_code, added_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    [c.peerId, c.publicKey, c.displayName, c.invitationCode, c.addedAt],
+    `INSERT OR REPLACE INTO contacts
+      (peer_id, public_key, display_name, invitation_code, added_at, signing_public_key)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [c.peerId, c.publicKey, c.displayName, c.invitationCode, c.addedAt, c.signingPublicKey],
   );
   persist();
 }
@@ -314,6 +366,74 @@ export function updateMessageStatus(messageId: string, status: MessageStatus, pl
     d.run("UPDATE messages SET status = ? WHERE message_id = ?", [status, messageId]);
   }
   persist();
+}
+
+/** Set or clear a reaction (idempotent — safe under gossip duplicates). */
+export function applyReaction(
+  messageId: string,
+  reactorId: string,
+  emoji: string,
+  op: "set" | "clear" = "set",
+): void {
+  const d = requireDb();
+  if (op === "clear") {
+    d.run(`DELETE FROM message_reactions WHERE message_id = ? AND reactor_id = ?`, [
+      messageId,
+      reactorId,
+    ]);
+  } else {
+    d.run(
+      `INSERT OR REPLACE INTO message_reactions (message_id, reactor_id, emoji) VALUES (?, ?, ?)`,
+      [messageId, reactorId, emoji],
+    );
+  }
+  persist();
+}
+
+export function listReactions(messageId: string): Array<{ reactorId: string; emoji: string }> {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT reactor_id, emoji FROM message_reactions WHERE message_id = ?`,
+    [messageId],
+  );
+  if (!res[0]) return [];
+  return res[0].values.map((v) => ({
+    reactorId: String(v[0]),
+    emoji: String(v[1]),
+  }));
+}
+
+/** Aggregate emoji → count for UI pills. */
+export function reactionSummary(messageId: string): Array<{ emoji: string; count: number }> {
+  const all = listReactions(messageId);
+  const map = new Map<string, number>();
+  for (const r of all) {
+    map.set(r.emoji, (map.get(r.emoji) ?? 0) + 1);
+  }
+  return [...map.entries()].map(([emoji, count]) => ({ emoji, count }));
+}
+
+export function markMessageDeleted(messageId: string): void {
+  const d = requireDb();
+  d.run(`UPDATE messages SET status = ?, plaintext_cache = ? WHERE message_id = ?`, [
+    "deleted",
+    null,
+    messageId,
+  ]);
+  persist();
+}
+
+export function getMessage(messageId: string): StoredMessage | null {
+  const d = requireDb();
+  const res = d.exec(
+    `SELECT message_id, conversation_id, sender_id, ciphertext, nonce, message_key_id,
+            created_at, delivery_deadline, decryption_deadline, retention_deadline,
+            status, encryption_metadata, wrapped_key, security_mode, plaintext_cache
+     FROM messages WHERE message_id = ?`,
+    [messageId],
+  );
+  if (!res[0]?.values[0]) return null;
+  return rowToMessage(res[0].values[0]);
 }
 
 export function saveMessageKey(k: MessageKeyRow): void {
@@ -484,9 +604,10 @@ export function getGroup(groupId: string): GroupRow | null {
 
 export function encodeInvitation(identity: LocalIdentity): string {
   const payload = {
-    v: 1,
+    v: 2,
     peerId: identity.peerId,
     publicKey: identity.publicKey,
+    signingPublicKey: identity.signingPublicKey,
     displayName: identity.displayName,
   };
   return `ztc1:${btoa(JSON.stringify(payload))}`;
@@ -498,12 +619,14 @@ export function decodeInvitation(code: string): Omit<Contact, "addedAt" | "invit
     peerId: string;
     publicKey: string;
     displayName: string;
+    signingPublicKey?: string;
   };
   if (!parsed.peerId || !parsed.publicKey) throw new Error("Malformed invitation");
   return {
     peerId: parsed.peerId,
     publicKey: parsed.publicKey,
     displayName: parsed.displayName,
+    signingPublicKey: parsed.signingPublicKey ?? null,
   };
 }
 

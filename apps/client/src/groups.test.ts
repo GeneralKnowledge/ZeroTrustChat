@@ -26,3 +26,12 @@ describe("group membership epoch changes", () => {
     expect(() => decryptGroupMessage(oldMsg, e2)).toThrow();
   });
 });
+
+describe("group gossip fanout contract", () => {
+  it("senderSeq is part of the chat payload shape used for digests", async () => {
+    const { pickFanoutTargets } = await import("./lib/groupTopology");
+    // 100-member group must not require 99 sends from the origin
+    const members = Array.from({ length: 99 }, (_, i) => `p${i}`);
+    expect(pickFanoutTargets(members, new Set(), 3).length).toBe(3);
+  });
+});

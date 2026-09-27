@@ -1,24 +1,26 @@
 # Distributed group chat (design)
 
-Design proposal for large groups (≈50–500+ members) without full-mesh P2P or central message distribution.
+Design for large groups (≈50–500+ members) without full-mesh P2P or central message distribution.
 
-**Status:** design only. The running prototype still uses full fan-out (see [Current prototype](#current-prototype-what-breaks-at-scale)). Protocol implementation is deferred until explicitly requested.
+**Status:** shared **connection pooling**, **compressed digests**, **signed epoch key-wrap**, **soft helper preference (within pool budget)**, and **passphrase identity backup** (simple multi-device) are implemented. Soft helpers never open edges beyond the device degree cap. MLS and push tickles remain out of scope.
 
-**Core principle:** do not optimise for instant synchronisation. A group should normally converge within ~2–3 minutes. That delay is an intentional trade-off for lower server load, bandwidth, battery use, attack surface, and dependence on central infrastructure.
+**Core principle:** do not optimise for instant synchronisation. A group should normally converge within ~2–3 minutes under churn, but propagation is eager on live edges (fanout + immediate forward + ~8s anti-entropy) — delay is not artificial.
 
-## Current prototype (what breaks at scale)
+## Implementation (current)
 
-Today groups are a **full fan-out mesh** (`apps/client/src/lib/groups.ts`):
+| Piece | Behaviour |
+|-------|-----------|
+| Shared pool | Device-wide max ~8 DataChannels; peers ranked by shared groups + liveness (`ensureTopology`) |
+| Send path | Encrypt once → fanout ≤3 connected members (not N−1) |
+| Gossip | On receive, forward to other live neighbors (deduped by `messageId`) |
+| Digests | Per-sender `(maxSeq, gaps[])` every ~8s + on connect; `want` / `have` repair |
+| Soft helpers | Capability ads on existing edges only; ranking bonus inside the same ~8-edge budget |
+| Signed epochs | Ed25519 announcement + per-member X25519-wrapped epoch key (no raw key flood) |
+| Multi-device | Passphrase-sealed identity backup (shared private keys); per-install `deviceId` for digest seqs |
 
-- `sendGroupMessage` encrypts once, then `p2p.send` to **every** other member.
-- `distributeEpoch` does the same for keys.
-- `P2pManager` keeps **one `RTCPeerConnection` per peer** with no degree cap (`apps/client/src/lib/p2p.ts`).
-- Reconnect repair is push-only: last **50** ciphertexts via `group_sync` (no gap detection / have-want).
-- Crypto is a **shared AES-256-GCM epoch key** rotated on membership change (`packages/crypto`); epoch payloads are unsigned; only the current epoch key is kept locally.
+## Current prototype (baseline that pooling replaced)
 
-That is correct for tiny prototype groups and wrong for ~100 members (≈99 DataChannels × signalling load on the central server).
-
-Central infrastructure already matches the intended role (signalling / presence / opaque ephemeral keys / rare `relay_packet`) via `@ztc/server-interface`. Group traffic must **not** become a new mailbox there.
+Earlier groups used a **full fan-out mesh**. That path is replaced by the shared pool + gossip implementation above. Remaining gaps vs production: no MLS, no push tickle, concurrent multi-device signalling is last-writer-wins for the same `peerId`.
 
 ## Goals and non-goals
 

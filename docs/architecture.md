@@ -127,7 +127,7 @@ flowchart LR
   M --> Mesh[P2P mesh DataChannels]
 ```
 
-Prototype uses a full mesh for small groups. For large groups (50–500+), see the design in [Distributed group chat](distributed-group-chat.md) (epidemic sparse mesh + soft temporary helpers; not yet implemented).
+Prototype historically used a full mesh for small groups. Large-group delivery now uses a **shared connection pool** and **gossip + compressed digests** — see [Distributed group chat](distributed-group-chat.md). Soft helpers / MLS remain future work.
 
 ## 9. Group membership changes
 
@@ -150,7 +150,7 @@ flowchart LR
   Peers --> Offline[Offline members: local retain + sync on reconnect]
 ```
 
-**Prototype:** sender fans out to every online member. **Designed (not implemented):** bounded fanout + gossip + anti-entropy so the central server never distributes group ciphertext — see [Distributed group chat](distributed-group-chat.md).
+**Prototype (updated):** sender fans out to a small set of live pool neighbors; gossip + digest anti-entropy repair the rest. **Still designed, not fully built:** soft temporary helpers, signed epoch key-wrap — see [Distributed group chat](distributed-group-chat.md).
 
 ## Package boundaries
 

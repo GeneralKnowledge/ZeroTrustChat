@@ -26,7 +26,8 @@ export type MessageStatus =
   | "expired"
   | "failed"
   | "decrypted"
-  | "key_destroyed";
+  | "key_destroyed"
+  | "deleted";
 
 export type SecurityMode = "normal" | "expiring" | "time_limited" | "one_time";
 

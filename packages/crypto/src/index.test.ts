@@ -11,6 +11,12 @@ import {
   isKeyAvailable,
   wrapMessageKeyForPeer,
   unwrapMessageKeyFromPeer,
+  wrapEpochKeyForPeer,
+  unwrapEpochKeyFromPeer,
+  signEpochAnnouncement,
+  verifyEpochAnnouncement,
+  sealIdentityBackup,
+  openIdentityBackup,
 } from "./index.js";
 
 describe("identity", () => {
@@ -78,5 +84,48 @@ describe("group epoch keys", () => {
     const enc2 = encryptGroupMessage("after charlie left", epoch2);
     expect(decryptGroupMessage(enc2, epoch2)).toBe("after charlie left");
     expect(() => decryptGroupMessage(enc2, epoch1)).toThrow();
+  });
+
+  it("wraps epoch key per member and verifies signed announcement", () => {
+    const alice = generateIdentity();
+    const bob = generateIdentity();
+    const epoch = generateGroupEpochKey("g2", 1, [alice.peerId, bob.peerId]);
+    const wrapped = wrapEpochKeyForPeer(epoch.key, alice.privateKey, bob.publicKey);
+    expect(unwrapEpochKeyFromPeer(wrapped, bob.privateKey, alice.publicKey)).toBe(epoch.key);
+
+    const fields = {
+      groupId: "g2",
+      name: "test",
+      epoch: 1,
+      prevEpoch: 0,
+      members: [alice.peerId, bob.peerId],
+      epochId: "eid-1",
+      changerId: alice.peerId,
+    };
+    const sig = signEpochAnnouncement(fields, alice.signingPrivateKey);
+    expect(verifyEpochAnnouncement(fields, sig, alice.signingPublicKey)).toBe(true);
+    expect(verifyEpochAnnouncement(fields, sig, bob.signingPublicKey)).toBe(false);
+  });
+});
+
+describe("identity backup", () => {
+  it("round-trips sealed identity with passphrase", () => {
+    const id = generateIdentity();
+    const sealed = sealIdentityBackup(
+      {
+        v: 1,
+        peerId: id.peerId,
+        publicKey: id.publicKey,
+        privateKey: id.privateKey,
+        signingPublicKey: id.signingPublicKey,
+        signingPrivateKey: id.signingPrivateKey,
+        displayName: id.displayName,
+      },
+      "correct horse battery",
+    );
+    const opened = openIdentityBackup(sealed, "correct horse battery");
+    expect(opened.peerId).toBe(id.peerId);
+    expect(opened.privateKey).toBe(id.privateKey);
+    expect(() => openIdentityBackup(sealed, "wrong passphrase")).toThrow();
   });
 });
