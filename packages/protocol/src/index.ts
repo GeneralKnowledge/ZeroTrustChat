@@ -110,6 +110,44 @@ export const RelayPacketSchema = strictObject({
   opaquePayload: z.string().min(1).max(65_536),
 });
 
+/** Short-lived PAKE intro nameplate (Wormhole-style). Digits only, 1–6 chars. */
+export const IntroNameplateSchema = z
+  .string()
+  .regex(/^[1-9][0-9]{0,5}$/, "nameplate must be 1–6 digit number without leading zero");
+
+/** Claim a one-shot intro nameplate (TTL enforced server-side). */
+export const IntroClaimSchema = strictObject({
+  type: z.literal("intro_claim"),
+  sessionId: SessionIdSchema,
+  nameplate: IntroNameplateSchema,
+  expiresAt: z.number().int().positive(),
+});
+
+/** Join an existing intro nameplate (second peer). */
+export const IntroJoinSchema = strictObject({
+  type: z.literal("intro_join"),
+  sessionId: SessionIdSchema,
+  nameplate: IntroNameplateSchema,
+});
+
+/**
+ * Opaque intro frame relay between the two sessions on a nameplate.
+ * Server must not parse opaquePayload — PAKE shares / encrypted identity only.
+ */
+export const IntroRelaySchema = strictObject({
+  type: z.literal("intro_relay"),
+  sessionId: SessionIdSchema,
+  nameplate: IntroNameplateSchema,
+  opaquePayload: z.string().min(1).max(65_536),
+});
+
+/** Release / tear down a nameplate after success or abort. */
+export const IntroReleaseSchema = strictObject({
+  type: z.literal("intro_release"),
+  sessionId: SessionIdSchema,
+  nameplate: IntroNameplateSchema,
+});
+
 export const GetStatsSchema = strictObject({
   type: z.literal("get_stats"),
   sessionId: SessionIdSchema,
@@ -132,6 +170,10 @@ export const ClientToServerSchema = z.discriminatedUnion("type", [
   PublishEphemeralKeySchema,
   RetrieveEphemeralKeySchema,
   RelayPacketSchema,
+  IntroClaimSchema,
+  IntroJoinSchema,
+  IntroRelaySchema,
+  IntroReleaseSchema,
   GetStatsSchema,
 ]);
 
@@ -191,6 +233,34 @@ export const RelayDeliveredSchema = strictObject({
   opaquePayload: z.string(),
 });
 
+export const IntroClaimedSchema = strictObject({
+  type: z.literal("intro_claimed"),
+  nameplate: IntroNameplateSchema,
+  expiresAt: z.number().int().positive(),
+});
+
+export const IntroJoinedSchema = strictObject({
+  type: z.literal("intro_joined"),
+  nameplate: IntroNameplateSchema,
+});
+
+/** Notifies the claimer that a second peer joined the nameplate. */
+export const IntroPeerJoinedSchema = strictObject({
+  type: z.literal("intro_peer_joined"),
+  nameplate: IntroNameplateSchema,
+});
+
+export const IntroFrameSchema = strictObject({
+  type: z.literal("intro_frame"),
+  nameplate: IntroNameplateSchema,
+  opaquePayload: z.string(),
+});
+
+export const IntroReleasedSchema = strictObject({
+  type: z.literal("intro_released"),
+  nameplate: IntroNameplateSchema,
+});
+
 export const ErrorSchema = strictObject({
   type: z.literal("error"),
   code: z.enum([
@@ -203,6 +273,9 @@ export const ErrorSchema = strictObject({
     "peer_not_found",
     "rate_limited",
     "protocol_mismatch",
+    "intro_crowded",
+    "intro_expired",
+    "intro_not_found",
     "internal",
   ]),
   message: z.string().max(500),
@@ -217,6 +290,8 @@ export const ServerStatsSchema = strictObject({
   contactListsReceived: z.literal(0),
   privateKeysReceived: z.literal(0),
   signallingMessagesRelayed: z.number().int().nonnegative(),
+  introNameplatesActive: z.number().int().nonnegative().optional(),
+  introFramesRelayed: z.number().int().nonnegative().optional(),
 });
 
 export const ServerCapabilitySchema = z.enum([
@@ -252,6 +327,11 @@ export const ServerToClientSchema = z.discriminatedUnion("type", [
   EphemeralKeyRetrievedSchema,
   EphemeralKeyMissingSchema,
   RelayDeliveredSchema,
+  IntroClaimedSchema,
+  IntroJoinedSchema,
+  IntroPeerJoinedSchema,
+  IntroFrameSchema,
+  IntroReleasedSchema,
   ErrorSchema,
   ServerStatsSchema,
 ]);
@@ -324,6 +404,10 @@ export const ALLOWED_CLIENT_FIELDS: Record<string, readonly string[]> = {
   ],
   retrieve_ephemeral_key: ["type", "sessionId", "keyId"],
   relay_packet: ["type", "sessionId", "fromPeerId", "toPeerId", "opaquePayload"],
+  intro_claim: ["type", "sessionId", "nameplate", "expiresAt"],
+  intro_join: ["type", "sessionId", "nameplate"],
+  intro_relay: ["type", "sessionId", "nameplate", "opaquePayload"],
+  intro_release: ["type", "sessionId", "nameplate"],
   get_stats: ["type", "sessionId"],
 };
 

@@ -23,6 +23,10 @@ Machine-readable schema: `packages/protocol/schema/protocol.schema.json`
 | `publish_ephemeral_key` | Store opaque encrypted key material |
 | `retrieve_ephemeral_key` | Fetch opaque material |
 | `relay_packet` | Opaque ciphertext relay |
+| `intro_claim` | Claim short-lived PAKE intro nameplate |
+| `intro_join` | Join intro nameplate (second peer) |
+| `intro_relay` | Opaque PAKE / sealed-identity frame (no peerId) |
+| `intro_release` | Tear down intro nameplate |
 | `get_stats` | Developer counters |
 
 ## Forbidden operations (hard reject)
@@ -42,7 +46,8 @@ upload_history, upload_private_key, mailbox_deposit, mailbox_fetch
 
 `server_info`, `session_registered`, `peer_available`, `peer_unavailable`, `signalling`,
 `presence_update`, `ephemeral_key_stored`, `ephemeral_key_retrieved`,
-`ephemeral_key_missing`, `relay_packet`, `error`, `server_stats`
+`ephemeral_key_missing`, `relay_packet`, `intro_claimed`, `intro_joined`,
+`intro_peer_joined`, `intro_frame`, `intro_released`, `error`, `server_stats`
 
 `server_stats.messagesStored` is always literal `0`.
 

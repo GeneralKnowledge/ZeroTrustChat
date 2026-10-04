@@ -72,6 +72,9 @@ importers:
       '@ztc/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@ztc/server-interface':
+        specifier: workspace:*
+        version: link:../../packages/server-interface
       '@ztc/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -103,6 +106,9 @@ importers:
 
   packages/crypto:
     dependencies:
+      '@cipherman/pake-js':
+        specifier: ^0.1.1
+        version: 0.1.1
       '@noble/ciphers':
         specifier: ^1.3.0
         version: 1.3.0
@@ -307,6 +313,10 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
+
+  '@cipherman/pake-js@0.1.1':
+    resolution: {integrity: sha512-iutxMCmRXYacl3fc19SKFisk1sRD1FNQi7+GWPlnQnFit6l3sUagYOCU2IgRPD8MF3s1HwnkSpqARFUp04+GVQ==}
+    engines: {node: '>=22'}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -1495,6 +1505,10 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
+
+  '@cipherman/pake-js@0.1.1':
+    dependencies:
+      '@noble/curves': 1.9.7
 
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
